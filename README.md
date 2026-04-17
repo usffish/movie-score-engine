@@ -1,120 +1,247 @@
 # Movie Score Scraper
 
-A command-line tool that fetches critic and audience scores for a personal movie list and writes the results to a new Excel workbook.
+A Python CLI tool that aggregates film scores from three independent sources, applies Bayesian-motivated weighting and min-max normalisation, and produces a single composite ranking — all written back to Excel without touching the original file.
 
-For each movie in `Movies.xlsx` it retrieves:
-- **Metascore** and **IMDB rating** from the [OMDb API](http://www.omdbapi.com/)
-- **Metascore** and **critic review count** scraped from Metacritic (preferred over OMDb when available)
-- **Average community rating** scraped from Letterboxd
-
-It then applies min-max normalisation across the full dataset and computes a weighted composite score, writing everything to `Movies_updated.xlsx` without touching the original file.
+**Stack:** Python · requests · BeautifulSoup · openpyxl · pytest · Hypothesis
 
 ---
 
-## Requirements
+## What it does
 
-- Python 3.10+
-- A free OMDb API key — register at [omdbapi.com](https://www.omdbapi.com/apikey.aspx)
+For every title in a personal `Movies.xlsx` watchlist, the tool:
+
+1. Fetches **Metascore** and **IMDB rating** from the [OMDb API](http://www.omdbapi.com/)
+2. Scrapes **critic review count** (and Metascore fallback) from Metacritic
+3. Scrapes **average community rating** from Letterboxd
+4. Normalises all three scores column-wide using min-max scaling
+5. Computes a **review-count-weighted composite score** grounded in Bayesian statistics
+6. Writes results to `Movies_updated.xlsx`, leaving the original file untouched
+
+---
+
+## Highlights
+
+- **Three-pass pipeline** — fetch → normalise → composite. Normalisation is intentionally separated from the fetch loop because min-max scaling requires the full column to be known before any single value can be computed.
+- **Bayesian-motivated weighting** — Metacritic's contribution to the composite scales with its critic review count, not a fixed coefficient. A score backed by 80 reviews carries more weight than the same score backed by 4. This is grounded in Laplace's rule of succession (see [Theory](#composite-score--theory) below).
+- **Dynamic denominator** — missing scores are dropped from both numerator and denominator rather than substituted with zeros, preserving the relative weighting of whichever sources are available.
+- **Resilient scraping** — all HTTP fetches retry up to 3 times with exponential back-off. Per-movie failures are logged and skipped; the rest of the batch continues.
+- **Data safety** — existing cell values are never overwritten by a missing result. The input workbook is never modified.
+- **Property-based test suite** — correctness properties (normalisation bounds, composite formula, ZeroDivisionError safety, global anchor computation) are verified with [Hypothesis](https://hypothesis.readthedocs.io/) across hundreds of generated inputs.
+- **Smart scheduling** — `--smart-update` tracks score stability over time and skips movies that haven't changed, reducing unnecessary network requests on repeat runs.
+
+---
+
+## Project structure
+
+```
+.
+├── update_scores.py          # Orchestrator, three-pass pipeline, CLI entry point
+├── requirements.txt
+├── Movies.xlsx               # Input watchlist (user-provided, not committed)
+├── Movies_updated.xlsx       # Generated output (not committed)
+├── scraper/
+│   ├── omdb_client.py        # OMDb API client — Metascore + IMDB rating
+│   ├── metacritic_scraper.py # Scrapes critic review count (+ Metascore fallback)
+│   └── letterboxd_scraper.py # Scrapes average community rating
+└── tests/
+    ├── test_omdb_client.py
+    ├── test_metacritic_scraper.py
+    ├── test_letterboxd_scraper.py
+    ├── test_orchestrator.py
+    ├── test_normalisation_properties.py  # Property: normalise_column bounds
+    ├── test_omdb_properties.py           # Property: OMDb parsing round-trip
+    ├── test_composite_properties.py      # Property: formula correctness + safety
+    ├── test_scraper_properties.py        # Property: review count, rating range, back-off
+    └── test_orchestrator_properties.py   # Property: input unchanged, output columns
+```
+
+---
+
+## Composite score — theory
+
+### The problem: can you trust a 100% rating?
+
+Consider three sellers offering the same product at the same price:
+
+| Seller | Rating | Reviews |
+|--------|--------|---------|
+| A | 100% positive | 10 |
+| B | 96% positive | 50 |
+| C | 93% positive | 200 |
+
+Most people instinctively distrust the 100% rating — it comes from so few reviews that it feels fragile. But how do you make that intuition *quantitative*?
+
+This is the central question in [3Blue1Brown's series on Bayesian statistics](https://www.youtube.com/watch?v=8idr1WZ1A7Q), and it is the theoretical foundation for how this project weights the Metacritic score.
+
+### Laplace's rule of succession
+
+When you observe `p` positive reviews out of `n` total, your best estimate of the true underlying success rate is not `p/n` but:
+
+```
+(p + 1) / (n + 2)
+```
+
+You pretend there were two extra reviews — one positive, one negative — before seeing any data. This is **Laplace's rule of succession** (18th century). It encodes a Bayesian prior of genuine uncertainty: the more real data accumulates, the less those two phantom reviews matter.
+
+Applied to the sellers above:
+
+| Seller | Adjusted estimate | |
+|--------|------------------|-|
+| A | (10 + 1) / (10 + 2) = **91.7%** | |
+| B | (48 + 1) / (50 + 2) = **94.2%** | ← best choice |
+| C | (186 + 1) / (200 + 2) = **92.6%** | |
+
+The seller with the highest raw percentage is not the best choice. The one with the most *evidence* behind a strong rating wins.
+
+### Applying this to Metacritic
+
+A Metascore is a weighted average of critic reviews. A score of 85 from 6 critics and a score of 85 from 80 critics are not equally trustworthy.
+
+This project applies the same logic: rather than giving Metacritic a fixed weight, its contribution to the composite is **scaled by its critic review count**. A Metascore backed by 80 reviews carries 80× the influence of a single fixed-weight term; one backed by 4 reviews carries only 4×.
+
+### Step 1 — Min-max normalisation
+
+The three sources use incompatible scales (0–100, 0–10, 0–5). Before combining them, each column is rescaled to `[0, 1]`:
+
+```
+st.X[i] = (X[i] − min(X)) / (max(X) − min(X))
+```
+
+`min` and `max` are computed across the entire batch after all fetches complete — not per-movie. This is why the pipeline separates fetching from normalisation. The best movie in each column maps to `1.0`, the worst to `0.0`, and everything else falls proportionally in between.
+
+### Step 2 — Review-count-weighted composite
+
+```
+TRUE = ((st.Metacritic × Reviews) + st.Letterboxd + Global_Max + Global_Min + st.IMDB)
+       / (Reviews + 4)
+```
+
+| Term | Weight | Rationale |
+|------|--------|-----------|
+| `st.Metacritic × Reviews` | `Reviews` | Metacritic's influence scales with critical coverage |
+| `st.Letterboxd` | `1` | Fixed unit weight |
+| `st.IMDB` | `1` | Fixed unit weight |
+| `Global_Max` | `1` | Batch anchor — highest normalised value across all columns |
+| `Global_Min` | `1` | Batch anchor — lowest normalised value across all columns |
+
+The denominator is `Reviews + 4` (4 fixed-weight terms plus the variable Metacritic weight).
+
+`Global_Max` and `Global_Min` anchor the composite to the actual spread of the batch, preventing scores from clustering toward the middle when movies are similar. In practice they are almost always `1.0` and `0.0` (min-max normalisation guarantees this), but the data-driven formulation handles edge cases — very small or uniform batches — without special-casing.
+
+### Dynamic denominator
+
+Missing scores are dropped from both numerator and denominator, not substituted with zeros. Substituting zeros would silently penalise movies with missing data regardless of how well they scored on available sources.
+
+| Condition | Effect on denominator |
+|-----------|----------------------|
+| `Reviews == 0` | Base denominator is 4 (Metacritic term dropped) |
+| `st.Letterboxd` is `None` | `− 1` |
+| `st.IMDB` is `None` | `− 1` |
+| Global anchors unavailable | `− 2` |
+| All terms missing | Return `None` |
 
 ---
 
 ## Setup
 
+**Requirements:** Python 3.10+, a free [OMDb API key](https://www.omdbapi.com/apikey.aspx)
+
 ```bash
-# 1. Create and activate a virtual environment
+# Create and activate a virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 2. Install dependencies
+# Install dependencies
 pip install -r requirements.txt
-```
 
----
-
-## Configuration
-
-The OMDb API key can be provided in two ways (the CLI flag takes precedence):
-
-```bash
-# Option A — environment variable (recommended)
+# Set your OMDb API key
 export OMDB_API_KEY=your_key_here
-
-# Option B — CLI flag
-python update_scores.py --api-key your_key_here
 ```
-
----
-
-## Input file
-
-Place your movie list in `Movies.xlsx` in the project root. The file must have a sheet with a column named **`Movies`** containing one title per row. All other columns are optional — the script will add any missing output columns automatically.
 
 ---
 
 ## Usage
 
 ```bash
-# Update all movies (reads Movies.xlsx, writes Movies_updated.xlsx)
+# Update all movies
 python update_scores.py
 
-# Specify a custom input file
-python update_scores.py --input my_list.xlsx
-
-# Specify a custom output path
-python update_scores.py --output results.xlsx
-
-# Pick 10 random movies to process
-python update_scores.py --limit 10
-
-# Process a single movie by exact title
+# Process a single movie
 python update_scores.py --movie "Boogie Nights"
 
-# Slow down requests (seconds between each source, default 1.0)
-python update_scores.py --delay 2.0
+# Test with a random sample of 10
+python update_scores.py --limit 10
 
-# Enable debug logging
-python update_scores.py --verbose
+# Use a custom input file
+python update_scores.py --input my_list.xlsx
 
-# Skip movies whose scores have been stable for a while
+# Skip recently-stable movies
 python update_scores.py --smart-update
 
-# Prompt to enter scores manually when scraping fails
+# Prompt for missing values when scraping fails
 python update_scores.py --manual
 
-# Combine flags
-python update_scores.py --smart-update --manual --delay 2.0
+# Adjust request delay (default 1.0s between sources)
+python update_scores.py --delay 2.0
 ```
 
-### All options
+### All CLI options
 
 | Flag | Default | Description |
-|---|---|---|
+|------|---------|-------------|
 | `--input PATH` | `Movies.xlsx` | Path to the input workbook |
-| `--output PATH` | `<input_stem>_updated.xlsx` | Path for the output workbook |
+| `--output PATH` | `<stem>_updated.xlsx` | Path for the output workbook |
 | `--api-key KEY` | — | OMDb API key (overrides `OMDB_API_KEY` env var) |
-| `--limit N` | — | Pick N movies at random to process |
+| `--limit N` | — | Pick N movies at random |
 | `--movie TITLE` | — | Process a single movie by exact title |
-| `--delay SECS` | `1.0` | Seconds to wait between requests to each source |
+| `--delay SECS` | `1.0` | Seconds between requests to each source |
 | `--verbose` | off | Enable debug-level logging |
-| `--smart-update` | off | Skip recently-stable movies (see below) |
-| `--manual` | off | Prompt for missing values when scraping fails |
+| `--smart-update` | off | Skip recently-stable movies |
+| `--manual` | off | Prompt for missing values interactively |
 
 ---
 
-## Data preservation
+## Input format
 
-Existing values in the workbook are **never overwritten by a missing result**. If a scraper returns nothing for a field (or the whole movie fails to fetch), the cell keeps whatever value it had before. Use `--manual` to fill in gaps interactively instead of leaving them blank.
+Place your watchlist in `Movies.xlsx` in the project root. The workbook must have a column named **`Movies`** with one title per row. All other columns are optional — the script adds any missing output columns automatically.
 
 ---
 
-## Manual entry (`--manual`)
+## Output columns
 
-When `--manual` is set, after all network fetches complete the script pauses and prompts you for any values it couldn't find:
+| Column | Description |
+|--------|-------------|
+| `Metacritic` | Metascore (0–100) — Metacritic scrape, falls back to OMDb |
+| `st.Metacritic` | Min-max normalised Metascore (0.0–1.0) |
+| `Reviews` | Critic review count from Metacritic |
+| `Letterboxd` | Average community rating (0.0–5.0) |
+| `st.Letterboxd` | Min-max normalised Letterboxd rating (0.0–1.0) |
+| `IMDB` | IMDB rating (0.0–10.0) from OMDb |
+| `st.IMDB` | Min-max normalised IMDB rating (0.0–1.0) |
+| `TRUE` | Weighted composite score (0.0–1.0, rounded to 2 dp) |
+| `LastUpdated` | ISO date of last successful fetch (`YYYY-MM-DD`) |
+| `StableWeeks` | Consecutive weeks the composite stayed within ±0.05 |
 
-- **Partial data** — if one or more fields came back empty for a movie, only those fields are prompted.
-- **Complete failure** — if the movie couldn't be fetched at all, all four fields are prompted.
+---
 
-Press **Enter** on any prompt to skip that field and keep the existing workbook value. If you skip every field for a failed movie, that movie is left unchanged.
+## Smart update
+
+`--smart-update` reduces unnecessary network requests on repeat runs by tracking score stability:
+
+- After each fetch, `StableWeeks` increments if the composite changed by ≤ 0.05, or resets to 0 if it changed more.
+- On the next run, a movie is skipped if fewer than `StableWeeks × 7` days have passed since `LastUpdated`.
+- Movies with any missing score are always fetched regardless of stability.
+
+---
+
+## Manual entry
+
+`--manual` prompts for any values that couldn't be scraped, after all network fetches complete:
+
+- **Partial data** — only the missing fields are prompted.
+- **Complete failure** — all four fields are prompted.
+
+Press Enter on any prompt to skip that field and keep the existing workbook value.
 
 ```
   ── Manual entry for: Nirvana the Band the Show the Movie ──
@@ -128,115 +255,28 @@ Press **Enter** on any prompt to skip that field and keep the existing workbook 
 
 ---
 
-## Smart update (`--smart-update`)
-
-Tracks how stable each movie's composite score has been over time and skips movies that don't need refreshing yet:
-
-- After each successful fetch, `LastUpdated` is set to today's date and `StableWeeks` is incremented if the composite score changed by ≤ 0.05, or reset to 0 if it changed more.
-- On the next run with `--smart-update`, a movie is skipped if fewer than `StableWeeks × 7` days have passed since `LastUpdated`.
-- Movies with any missing score are **always** fetched regardless of stability.
-
----
-
-## Output columns
-
-The output workbook contains the original data plus these columns:
-
-| Column | Description |
-|---|---|
-| `Metacritic` | Metascore (0–100) — scraped from Metacritic, falls back to OMDb |
-| `st.Metacritic` | Min-max normalised Metascore (0.0–1.0) |
-| `Reviews` | Critic review count scraped from Metacritic |
-| `Letterboxd` | Average community rating (0.0–5.0) from Letterboxd |
-| `st.Letterboxd` | Min-max normalised Letterboxd rating (0.0–1.0) |
-| `IMDB` | IMDB rating (0.0–10.0) from OMDb |
-| `st.IMDB` | Min-max normalised IMDB rating (0.0–1.0) |
-| `TRUE` | Weighted composite score (rounded to 2 dp) |
-| `LastUpdated` | ISO date of last successful fetch (`YYYY-MM-DD`) |
-| `StableWeeks` | Consecutive weeks the composite score stayed within ±0.05 |
-
-### Composite formula
-
-```
-TRUE = ((st.Metacritic × Reviews) + st.Letterboxd + Global_Max + Global_Min + st.IMDB)
-       / (Reviews + 4)
-```
-
-- `Global_Max` and `Global_Min` are the highest and lowest normalised values across all three score columns for the current batch.
-- Missing scores are dropped from both numerator and denominator (dynamic denominator) rather than substituted with zeros.
-
----
-
-## Syncing the updated file back to Movies.xlsx
-
-After reviewing `Movies_updated.xlsx`, make it the new baseline so the next run builds on top of it (preserving `StableWeeks`, `LastUpdated`, and any scores already fetched):
-
-```bash
-# Optional: keep a backup of the original
-cp Movies.xlsx Movies_backup.xlsx
-
-# Promote the updated file
-cp Movies_updated.xlsx Movies.xlsx
-```
-
-The next `python update_scores.py` will then read from the promoted file. If you're using `--smart-update`, the stability counters carry over correctly.
-
-> **Note:** close the file in Excel before copying — the `~$Movies_updated.xlsx` lock file means Excel still has it open.
-
----
-
-## How it works
-
-The script runs a three-pass pipeline to ensure normalisation is always column-wide:
-
-1. **Pass 1 — Fetch**: retrieve raw scores for every movie from all three sources.
-2. **Manual entry** *(optional, `--manual`)*: prompt for any values that couldn't be fetched.
-3. **Pass 2 — Normalise**: apply min-max normalisation across the full batch for each score column.
-4. **Pass 3 — Composite**: compute global anchors, then calculate the composite score per movie.
-
-Normalisation and composite calculation never happen inside the per-movie fetch loop.
-
----
-
 ## Running the tests
 
 ```bash
-# Run the full test suite
+# Full test suite
 python -m pytest
 
-# Run a specific test file
-python -m pytest tests/test_omdb_client.py
-
-# Run with verbose output
+# Verbose output
 python -m pytest -v
 
-# Run only property-based tests
+# Property-based tests only
 python -m pytest tests/test_normalisation_properties.py tests/test_composite_properties.py tests/test_scraper_properties.py tests/test_omdb_properties.py tests/test_orchestrator_properties.py
 ```
 
 ---
 
-## Project structure
+## Promoting the output back to the input
 
+After reviewing `Movies_updated.xlsx`, promote it to the new baseline so the next run builds on top of it:
+
+```bash
+cp Movies.xlsx Movies_backup.xlsx   # optional backup
+cp Movies_updated.xlsx Movies.xlsx
 ```
-.
-├── update_scores.py          # Orchestrator and CLI entry point
-├── requirements.txt
-├── Movies.xlsx               # Your input file (not included)
-├── Movies_updated.xlsx       # Generated output (not committed)
-├── scraper/
-│   ├── omdb_client.py        # OMDb API client (Metascore + IMDB rating)
-│   ├── metacritic_scraper.py # Scrapes critic review count and Metascore
-│   ├── letterboxd_scraper.py # Scrapes average community rating
-│   └── imdb_scraper.py       # Legacy — not used, do not extend
-└── tests/
-    ├── test_omdb_client.py
-    ├── test_metacritic_scraper.py
-    ├── test_letterboxd_scraper.py
-    ├── test_orchestrator.py
-    ├── test_normalisation_properties.py
-    ├── test_omdb_properties.py
-    ├── test_composite_properties.py
-    ├── test_scraper_properties.py
-    └── test_orchestrator_properties.py
-```
+
+> Close the file in Excel first — an open workbook creates a `~$Movies_updated.xlsx` lock file.
