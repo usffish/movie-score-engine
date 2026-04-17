@@ -38,7 +38,7 @@ import random
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 # Score normalisation helpers (Pass 2)
 # ---------------------------------------------------------------------------
 
-def normalise_column(values: list) -> list:
+def normalise_column(values: list[Optional[float]]) -> list[Optional[float]]:
     """
     Apply min-max normalisation to a column of values.
 
@@ -113,7 +113,7 @@ def normalise_column(values: list) -> list:
     ]
 
 
-def normalise_all(raw_scores: list) -> list:
+def normalise_all(raw_scores: list[RawScores]) -> list[NormalisedScores]:
     """
     Pass 2: apply normalise_column to Metacritic, Letterboxd, and IMDB columns.
 
@@ -149,7 +149,7 @@ def normalise_all(raw_scores: list) -> list:
 # Composite score helpers (Pass 3)
 # ---------------------------------------------------------------------------
 
-def compute_global_anchors(normalised: list) -> tuple:
+def compute_global_anchors(normalised: list[NormalisedScores]) -> tuple[Optional[float], Optional[float]]:
     """
     Compute (Global_Max_St, Global_Min_St) across all non-None values in
     st_metacritic, st_letterboxd, and st_imdb columns combined.
@@ -215,7 +215,7 @@ def compute_composite(
     return round(numerator / denominator, 2)
 
 
-def compute_all_composites(normalised: list) -> list:
+def compute_all_composites(normalised: list[NormalisedScores]) -> list[NormalisedScores]:
     """
     Pass 3: compute composite scores for all movies.
 
@@ -297,11 +297,11 @@ def read_existing_scores(ws, ws_row: int, header_map: dict) -> RawScores:
 
 
 def fetch_all(
-    movies: list,
+    movies: list[str],
     api_key: str,
     delay: float = 1.0,
     verbose: bool = False,
-) -> tuple:
+) -> tuple[list[RawScores], list[str]]:
     """
     Pass 1: fetch raw scores for all movies.
 
@@ -514,11 +514,11 @@ def _manual_matches_existing(new: RawScores, prev: RawScores) -> bool:
 
 
 def apply_manual_entry(
-    raw_scores: list,
-    failed: list,
+    raw_scores: list[RawScores],
+    failed: list[str],
     manual: bool,
-    existing: Optional[dict] = None,
-) -> tuple:
+    existing: Optional[dict[str, RawScores]] = None,
+) -> tuple[list[RawScores], list[str], set[str]]:
     """
     After Pass 1, optionally prompt the user for missing values.
 
@@ -603,7 +603,7 @@ SCORE_COLUMN_MAP = {
 _STABILITY_THRESHOLD = 0.05
 
 
-def load_workbook(path: Path):
+def load_workbook_from_path(path: Path):
     wb = openpyxl.load_workbook(path)
     ws = wb.active
     return wb, ws
@@ -778,7 +778,7 @@ def update_workbook(
     by None — if a scraper returns nothing and the user skips manual entry,
     the previous value in the workbook is preserved.
     """
-    wb, ws = load_workbook(input_path)
+    wb, ws = load_workbook_from_path(input_path)
     header_map = get_header_map(ws)
 
     title_col = header_map.get("Movies")

@@ -7,6 +7,7 @@ Letterboxd film pages follow the pattern:
 where the slug is a URL-friendly version of the title.
 """
 
+import json
 import logging
 import re
 import time
@@ -75,7 +76,6 @@ def _parse_rating_from_soup(soup: BeautifulSoup) -> Optional[float]:
     # Secondary: JSON-LD aggregateRating block
     script = soup.find("script", type="application/ld+json")
     if script:
-        import json
         try:
             data = json.loads(script.string or "")
             agg = data.get("aggregateRating", {})
@@ -120,7 +120,6 @@ def _parse_review_count_from_soup(soup: BeautifulSoup) -> Optional[int]:
 
     script = soup.find("script", type="application/ld+json")
     if script:
-        import json
         try:
             data = json.loads(script.string or "")
             agg = data.get("aggregateRating", {})
