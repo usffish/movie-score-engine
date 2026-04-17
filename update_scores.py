@@ -9,12 +9,13 @@ Movies_updated.xlsx (the original file is never overwritten).
 Usage
 -----
     python update_scores.py                        # update all movies
-    python update_scores.py --limit 10             # only first 10 rows (testing)
+    python update_scores.py --limit 10             # only 10 random movies (testing)
     python update_scores.py --movie "Boogie Nights" # single movie
     python update_scores.py --input my_list.xlsx   # custom input file
     python update_scores.py --delay 1.5            # seconds between requests
     python update_scores.py --api-key YOUR_KEY     # OMDb API key
     python update_scores.py --smart-update         # skip recently-stable movies
+    python update_scores.py --manual               # prompt for missing values
 
 Output columns added / updated
 -------------------------------
@@ -33,6 +34,7 @@ Output columns added / updated
 import argparse
 import logging
 import os
+import random
 import sys
 import time
 from dataclasses import dataclass
@@ -44,7 +46,7 @@ import openpyxl
 from tqdm import tqdm
 
 from scraper.letterboxd_scraper import get_letterboxd_data
-from scraper.metacritic_scraper import get_review_count
+from scraper.metacritic_scraper import get_metacritic_data
 from scraper.omdb_client import get_omdb_data
 
 # ---------------------------------------------------------------------------
@@ -250,6 +252,50 @@ def compute_all_composites(normalised: list) -> list:
 # Pass 1: Fetch all raw scores
 # ---------------------------------------------------------------------------
 
+def read_existing_scores(ws, ws_row: int, header_map: dict) -> RawScores:
+    """
+    Read the current score values from a workbook row into a RawScores object.
+
+    Used by apply_manual_entry to compare new manual entries against what is
+    already stored.  When the user enters the same values as last time the
+    composite won't change, so StableWeeks should increment rather than reset.
+    """
+    def _int_cell(col_name):
+        col = header_map.get(col_name)
+        if col is None:
+            return None
+        val = ws.cell(row=ws_row, column=col).value
+        try:
+            return int(val) if val is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    def _float_cell(col_name):
+        col = header_map.get(col_name)
+        if col is None:
+            return None
+        val = ws.cell(row=ws_row, column=col).value
+        try:
+            return float(val) if val is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    metascore = _int_cell("Metacritic")
+    imdb_rating = _float_cell("IMDB")
+    review_count_raw = _int_cell("Reviews")
+    review_count = review_count_raw if review_count_raw is not None else 0
+    letterboxd_rating = _float_cell("Letterboxd")
+
+    # Title is filled in by the caller
+    return RawScores(
+        title="",
+        metascore=metascore,
+        imdb_rating=imdb_rating,
+        review_count=review_count,
+        letterboxd_rating=letterboxd_rating,
+    )
+
+
 def fetch_all(
     movies: list,
     api_key: str,
@@ -282,17 +328,24 @@ def fetch_all(
             omdb = get_omdb_data(title, api_key)
             time.sleep(delay)
 
-            review_count = get_review_count(title)
+            mc = get_metacritic_data(title)
             time.sleep(delay)
 
             lb = get_letterboxd_data(title)
             time.sleep(delay)
 
+            # Prefer the Metascore scraped directly from Metacritic when
+            # available (covers the 1–3 review case where OMDb may not have
+            # it).  Fall back to the OMDb value otherwise.
+            scraped_metascore = mc.get("metascore")
+            omdb_metascore = omdb.get("metascore") if omdb.get("imdb_id") else None
+            metascore = scraped_metascore if scraped_metascore is not None else omdb_metascore
+
             raw_scores.append(RawScores(
                 title=title,
-                metascore=omdb.get("metascore"),
+                metascore=metascore,
                 imdb_rating=omdb.get("imdb_rating"),
-                review_count=review_count,
+                review_count=mc.get("review_count", 0),
                 letterboxd_rating=lb.get("rating"),
             ))
         except Exception as exc:
@@ -301,6 +354,228 @@ def fetch_all(
             continue
 
     return raw_scores, failed
+
+
+# ---------------------------------------------------------------------------
+# Manual entry helpers
+# ---------------------------------------------------------------------------
+
+def _prompt_value(prompt: str, parser, label: str):
+    """
+    Prompt the user for a value, parse it with *parser*, and return the result.
+
+    Returns None if the user presses Enter without typing anything (skip).
+    Loops until a valid value is entered or the user skips.
+    """
+    while True:
+        raw = input(prompt).strip()
+        if raw == "":
+            return None
+        try:
+            return parser(raw)
+        except (ValueError, TypeError):
+            print(f"  Invalid {label}. Press Enter to skip, or try again.")
+
+
+def _prompt_int_in_range(prompt: str, lo: int, hi: int, label: str) -> Optional[int]:
+    """Prompt for an integer in [lo, hi], returning None on empty input."""
+    def parse(s):
+        v = int(s)
+        if not (lo <= v <= hi):
+            raise ValueError(f"{v} not in [{lo}, {hi}]")
+        return v
+    return _prompt_value(prompt, parse, label)
+
+
+def _prompt_float_in_range(prompt: str, lo: float, hi: float, label: str) -> Optional[float]:
+    """Prompt for a float in [lo, hi], returning None on empty input."""
+    def parse(s):
+        v = float(s)
+        if not (lo <= v <= hi):
+            raise ValueError(f"{v} not in [{lo}, {hi}]")
+        return v
+    return _prompt_value(prompt, parse, label)
+
+
+def prompt_missing_scores(raw: RawScores) -> RawScores:
+    """
+    Interactively prompt the user to fill in any None/zero fields on *raw*.
+
+    Called only when --manual is active and a movie has missing data.
+    Returns a new RawScores with user-supplied values merged in.
+    """
+    print(f"\n  ── Manual entry for: {raw.title} ──")
+    print("  (Press Enter to skip a field and leave it unchanged)\n")
+
+    metascore = raw.metascore
+    imdb_rating = raw.imdb_rating
+    review_count = raw.review_count
+    letterboxd_rating = raw.letterboxd_rating
+
+    if metascore is None:
+        metascore = _prompt_int_in_range(
+            "  Metascore (0-100): ", 0, 100, "Metascore"
+        )
+
+    if imdb_rating is None:
+        imdb_rating = _prompt_float_in_range(
+            "  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating"
+        )
+
+    if review_count == 0:
+        rc = _prompt_int_in_range(
+            "  Critic review count (0+): ", 0, 100_000, "review count"
+        )
+        if rc is not None:
+            review_count = rc
+
+    if letterboxd_rating is None:
+        letterboxd_rating = _prompt_float_in_range(
+            "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
+        )
+
+    return RawScores(
+        title=raw.title,
+        metascore=metascore,
+        imdb_rating=imdb_rating,
+        review_count=review_count,
+        letterboxd_rating=letterboxd_rating,
+    )
+
+
+def prompt_failed_movie(title: str) -> Optional[RawScores]:
+    """
+    Interactively prompt the user to enter all scores for a movie that
+    failed entirely during fetch.
+
+    Returns a RawScores if the user provides at least one value, or None
+    if the user skips all fields.
+    """
+    print(f"\n  ── Manual entry for failed movie: {title} ──")
+    print("  (Press Enter to skip a field)\n")
+
+    metascore = _prompt_int_in_range(
+        "  Metascore (0-100): ", 0, 100, "Metascore"
+    )
+    imdb_rating = _prompt_float_in_range(
+        "  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating"
+    )
+    rc = _prompt_int_in_range(
+        "  Critic review count (0+): ", 0, 100_000, "review count"
+    )
+    review_count = rc if rc is not None else 0
+    letterboxd_rating = _prompt_float_in_range(
+        "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
+    )
+
+    # If the user skipped everything, return None
+    if all(v is None for v in (metascore, imdb_rating, letterboxd_rating)) and review_count == 0:
+        logger.info("Skipped manual entry for '%s'", title)
+        return None
+
+    return RawScores(
+        title=title,
+        metascore=metascore,
+        imdb_rating=imdb_rating,
+        review_count=review_count,
+        letterboxd_rating=letterboxd_rating,
+    )
+
+
+def _manual_matches_existing(new: RawScores, prev: RawScores) -> bool:
+    """
+    Return True if every score field in *new* that was manually entered
+    matches the corresponding field already stored in *prev*.
+
+    A field is considered "manually entered" (and therefore worth comparing)
+    when it is not None / non-zero in *new*.  If *new* has a value and it
+    equals *prev*, the entry is unchanged.  We use exact equality for ints
+    and a small epsilon for floats to tolerate rounding.
+    """
+    _EPS = 1e-9
+
+    def _eq(a, b) -> bool:
+        if a is None or b is None:
+            return a == b
+        if isinstance(a, float) or isinstance(b, float):
+            return abs(float(a) - float(b)) < _EPS
+        return a == b
+
+    # Only compare fields that were actually filled in (non-None / non-zero)
+    if new.metascore is not None and not _eq(new.metascore, prev.metascore):
+        return False
+    if new.imdb_rating is not None and not _eq(new.imdb_rating, prev.imdb_rating):
+        return False
+    if new.review_count and not _eq(new.review_count, prev.review_count):
+        return False
+    if new.letterboxd_rating is not None and not _eq(new.letterboxd_rating, prev.letterboxd_rating):
+        return False
+    return True
+
+
+def apply_manual_entry(
+    raw_scores: list,
+    failed: list,
+    manual: bool,
+    existing: Optional[dict] = None,
+) -> tuple:
+    """
+    After Pass 1, optionally prompt the user for missing values.
+
+    - For movies with partial data (None fields), prompts to fill gaps.
+    - For movies that failed entirely, prompts to enter all scores.
+
+    When *existing* is provided (a dict mapping title -> RawScores read from
+    the workbook before this run), each manually-entered value is compared
+    against the stored value.  If every field the user entered matches what
+    was already in the workbook, the title is added to the returned
+    *manual_unchanged* set.  The caller uses this set to tell update_stability
+    to treat the movie as stable (increment StableWeeks) rather than resetting
+    it, because the scores haven't actually changed.
+
+    Returns:
+        (raw_scores, failed, manual_unchanged)
+        where manual_unchanged is a set of titles whose manual entries were
+        identical to the existing workbook values.
+    """
+    manual_unchanged: set = set()
+
+    if not manual:
+        return raw_scores, failed, manual_unchanged
+
+    existing = existing or {}
+
+    # Fill gaps in partially-fetched movies
+    updated_raw = []
+    for raw in raw_scores:
+        has_missing = (
+            raw.metascore is None
+            or raw.imdb_rating is None
+            or raw.review_count == 0
+            or raw.letterboxd_rating is None
+        )
+        if has_missing:
+            filled = prompt_missing_scores(raw)
+            # Check whether the user's entries match the existing workbook values
+            prev = existing.get(raw.title)
+            if prev is not None and _manual_matches_existing(filled, prev):
+                manual_unchanged.add(raw.title)
+            raw = filled
+        updated_raw.append(raw)
+
+    # Prompt for fully-failed movies
+    still_failed = []
+    for title in failed:
+        result = prompt_failed_movie(title)
+        if result is not None:
+            prev = existing.get(title)
+            if prev is not None and _manual_matches_existing(result, prev):
+                manual_unchanged.add(title)
+            updated_raw.append(result)
+        else:
+            still_failed.append(title)
+
+    return updated_raw, still_failed, manual_unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -427,12 +702,18 @@ def update_stability(
     header_map: dict,
     new_composite: Optional[float],
     today: date,
+    manual_unchanged: bool = False,
 ) -> None:
     """
     Update LastUpdated and StableWeeks for a row after a successful fetch.
 
     StableWeeks increments by 1 if the new composite is within ±0.05 of the
     previous value; resets to 0 if it changed more than that.
+
+    When *manual_unchanged* is True the scores were entered manually and are
+    identical to the values already in the workbook, so the composite cannot
+    have changed.  StableWeeks is incremented unconditionally in that case,
+    matching the behaviour of a scrape that returned the same values as before.
     """
     lu_col = header_map.get("LastUpdated")
     sw_col = header_map.get("StableWeeks")
@@ -450,7 +731,10 @@ def update_stability(
     _, prev_stable_weeks = _read_stability(ws, ws_row, header_map)
 
     # Determine new StableWeeks
-    if new_composite is None or prev_composite is None:
+    if manual_unchanged:
+        # Scores are identical to last run — always stable
+        new_stable_weeks = prev_stable_weeks + 1
+    elif new_composite is None or prev_composite is None:
         new_stable_weeks = 0
     elif abs(new_composite - prev_composite) <= _STABILITY_THRESHOLD:
         new_stable_weeks = prev_stable_weeks + 1
@@ -476,6 +760,7 @@ def update_workbook(
     delay: float = 1.0,
     verbose: bool = False,
     smart_update: bool = False,
+    manual: bool = False,
 ):
     """
     Three-pass pipeline:
@@ -487,6 +772,11 @@ def update_workbook(
     When smart_update=True, movies are skipped if their scores have been
     stable long enough (StableWeeks * 7 days since last update).
     Movies with missing scores are always updated.
+
+    When manual=True, the user is prompted to enter any values that could
+    not be fetched automatically.  Existing cell values are never overwritten
+    by None — if a scraper returns nothing and the user skips manual entry,
+    the previous value in the workbook is preserved.
     """
     wb, ws = load_workbook(input_path)
     header_map = get_header_map(ws)
@@ -517,8 +807,9 @@ def update_workbook(
             logger.error("Movie '%s' not found in spreadsheet.", target_movie)
             sys.exit(1)
 
-    # Apply --limit filter
+    # Apply --limit filter: pick N movies at random
     if limit:
+        random.shuffle(movie_rows)
         movie_rows = movie_rows[:limit]
 
     # Apply smart-update filter: skip movies that don't need updating yet
@@ -546,8 +837,24 @@ def update_workbook(
     # Build ordered list of titles for fetch_all
     movies = [t for _, t in movie_rows]
 
+    # Read existing workbook scores before fetching — used by apply_manual_entry
+    # to detect when a manual entry is identical to the previously stored value.
+    existing_scores: dict = {}
+    if manual:
+        for ws_row, title in movie_rows:
+            prev = read_existing_scores(ws, ws_row, header_map)
+            prev.title = title
+            existing_scores[title] = prev
+
     # Pass 1: fetch raw scores for all movies
     raw_scores, failed = fetch_all(movies, api_key=api_key, delay=delay, verbose=verbose)
+
+    # Manual entry: prompt for any values that couldn't be fetched automatically.
+    # This happens after all network fetches complete, before normalisation.
+    # Returns a third value: set of titles whose manual entries matched existing.
+    raw_scores, failed, manual_unchanged = apply_manual_entry(
+        raw_scores, failed, manual=manual, existing=existing_scores
+    )
 
     # Pass 2: normalise column-wide (must happen after all fetches complete)
     normalised = normalise_all(raw_scores)
@@ -574,7 +881,8 @@ def update_workbook(
                 ws.cell(row=ws_row, column=col_idx, value=value)
 
         # Update stability tracking columns
-        update_stability(ws, ws_row, header_map, ns.composite, today)
+        is_unchanged = title in manual_unchanged
+        update_stability(ws, ws_row, header_map, ns.composite, today, manual_unchanged=is_unchanged)
 
     wb.save(output_path)
     logger.info("Saved updated workbook to %s", output_path)
@@ -603,7 +911,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--limit", type=int, default=None,
-        help="Only process the first N movies (useful for testing)"
+        help="Pick N movies at random to process (useful for testing)"
     )
     parser.add_argument(
         "--movie", default=None,
@@ -628,6 +936,13 @@ def parse_args(argv=None):
             "Skip movies whose scores have been stable recently. "
             "A movie stable for N weeks is skipped for N weeks. "
             "Movies with missing scores are always updated."
+        )
+    )
+    parser.add_argument(
+        "--manual", action="store_true", dest="manual",
+        help=(
+            "Prompt for manual entry when scores cannot be fetched automatically. "
+            "Existing values in the workbook are preserved when a field is skipped."
         )
     )
     return parser.parse_args(argv)
@@ -669,6 +984,7 @@ def main(argv=None):
         delay=args.delay,
         verbose=args.verbose,
         smart_update=args.smart_update,
+        manual=args.manual,
     )
 
 

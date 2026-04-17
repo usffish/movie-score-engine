@@ -219,7 +219,7 @@ class TestMissingMoviesColumn:
 
 class TestLimitArg:
     def test_limit_restricts_movies_processed(self, tmp_path):
-        """--limit N should only process the first N movies."""
+        """--limit N should only process N movies, chosen at random."""
         titles = ["Movie A", "Movie B", "Movie C", "Movie D", "Movie E"]
         wb = make_workbook(titles)
         input_file = tmp_path / "Movies.xlsx"
@@ -237,8 +237,8 @@ class TestLimitArg:
                         limit=3,
                     )
             called_movies = mock_fetch.call_args[0][0]
-            assert called_movies == ["Movie A", "Movie B", "Movie C"]
             assert len(called_movies) == 3
+            assert set(called_movies).issubset(set(titles))
 
 
 # ---------------------------------------------------------------------------
@@ -349,12 +349,12 @@ class TestTitleLoggedBeforeFetch:
         titles = ["Inception", "The Matrix"]
 
         with patch("update_scores.get_omdb_data") as mock_omdb, \
-             patch("update_scores.get_review_count") as mock_rc, \
+             patch("update_scores.get_metacritic_data") as mock_mc, \
              patch("update_scores.get_letterboxd_data") as mock_lb, \
              patch("update_scores.time.sleep"):
 
             mock_omdb.return_value = {"metascore": 74, "imdb_rating": 7.8, "imdb_id": "tt1"}
-            mock_rc.return_value = 80
+            mock_mc.return_value = {"review_count": 80, "metascore": 74}
             mock_lb.return_value = {"rating": 3.9, "rating_count": 100, "url": "http://x"}
 
             with caplog.at_level(logging.INFO, logger="update_scores"):
@@ -373,7 +373,8 @@ class TestTitleLoggedBeforeFetch:
             return {"metascore": 74, "imdb_rating": 7.8, "imdb_id": "tt1"}
 
         with patch("update_scores.get_omdb_data", side_effect=log_side_effect), \
-             patch("update_scores.get_review_count", return_value=10), \
+             patch("update_scores.get_metacritic_data",
+                   return_value={"review_count": 10, "metascore": 74}), \
              patch("update_scores.get_letterboxd_data",
                    return_value={"rating": 3.5, "rating_count": 50, "url": "http://x"}), \
              patch("update_scores.time.sleep"):
@@ -401,7 +402,8 @@ class TestFetchAllExceptionHandling:
             return {"metascore": 74, "imdb_rating": 7.8, "imdb_id": "tt1"}
 
         with patch("update_scores.get_omdb_data", side_effect=omdb_side_effect), \
-             patch("update_scores.get_review_count", return_value=10), \
+             patch("update_scores.get_metacritic_data",
+                   return_value={"review_count": 10, "metascore": 74}), \
              patch("update_scores.get_letterboxd_data",
                    return_value={"rating": 3.5, "rating_count": 50, "url": "http://x"}), \
              patch("update_scores.time.sleep"):

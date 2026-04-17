@@ -1,13 +1,19 @@
 """
 Metacritic scraper using requests + BeautifulSoup.
-Fetches only the critic review count for a film.
+Fetches the critic review count and, when available, the Metascore for a film.
 
 Metacritic film pages follow the pattern:
   https://www.metacritic.com/movie/<slug>/
+
+When a film has only 1–3 critic reviews, Metacritic does not display an
+aggregate Metascore.  In that case this module fetches the individual review
+scores from the critic-reviews sub-page and averages them to produce a
+synthetic Metascore.
 """
 
 import json
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -33,7 +39,12 @@ SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
 _MOVIE_URL = "https://www.metacritic.com/movie/{slug}/"
+_REVIEWS_URL = "https://www.metacritic.com/movie/{slug}/critic-reviews/"
 _SEARCH_URL = "https://www.metacritic.com/search/{query}/?category=2"  # category 2 = movies
+
+# Metacritic only shows an aggregate Metascore once a film has at least this
+# many critic reviews.  Below this threshold we average the individual scores.
+_MIN_REVIEWS_FOR_AGGREGATE = 4
 
 
 def _slugify(text: str) -> str:
@@ -107,6 +118,65 @@ def _extract_review_count(soup: BeautifulSoup) -> Optional[int]:
     return None
 
 
+def _extract_aggregate_score(soup: BeautifulSoup) -> Optional[int]:
+    """
+    Extract the aggregate Metascore from a Metacritic movie page.
+
+    Returns None when the score is not present (e.g. fewer than 4 reviews).
+    """
+    # JSON-LD is the most reliable source
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            if isinstance(data, list):
+                data = data[0]
+            agg = data.get("aggregateRating", {})
+            value = agg.get("ratingValue")
+            if value is not None:
+                score = round(float(value))
+                return max(0, min(100, score))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+
+    # Fallback: look for a prominent score element in the HTML.
+    # Metacritic renders the Metascore inside elements like:
+    #   <span ...>95</span>  near text "METASCORE" or "Metascore"
+    for tag in soup.find_all(string=re.compile(r"\bMetascore\b", re.IGNORECASE)):
+        parent = tag.parent
+        # Walk up a few levels looking for a sibling/child with a bare integer
+        for _ in range(4):
+            if parent is None:
+                break
+            nums = re.findall(r"\b(\d{1,3})\b", parent.get_text())
+            for n in nums:
+                val = int(n)
+                if 0 <= val <= 100:
+                    return val
+            parent = parent.parent
+
+    return None
+
+
+def _extract_individual_scores(soup: BeautifulSoup) -> list:
+    """
+    Parse individual critic scores from a Metacritic critic-reviews page.
+
+    Metacritic renders each score as text matching "Metascore N out of 100"
+    (visible in the rendered page).  Returns a list of ints (0–100).
+    """
+    scores = []
+
+    # Pattern seen in rendered HTML: "Metascore 88 out of 100"
+    pattern = re.compile(r"Metascore\s+(\d{1,3})\s+out\s+of\s+100", re.IGNORECASE)
+    for text in soup.find_all(string=pattern):
+        for match in pattern.finditer(text):
+            val = int(match.group(1))
+            if 0 <= val <= 100:
+                scores.append(val)
+
+    return scores
+
+
 def _search_for_slug(title: str) -> Optional[str]:
     """Search Metacritic and return the slug of the best matching movie."""
     query = re.sub(r"\s+", "%20", title.strip())
@@ -138,12 +208,14 @@ def _search_for_slug(title: str) -> Optional[str]:
     return None
 
 
-def get_review_count(title: str, year: Optional[int] = None) -> int:
+def get_metacritic_data(title: str, year: Optional[int] = None) -> dict:
     """
-    Fetch the critic review count for a movie from Metacritic.
+    Fetch critic review count and Metascore for a movie from Metacritic.
 
-    Tries the direct slug URL (with and without leading article), then falls
-    back to a search query. Returns 0 on any failure.
+    When the film has 4+ reviews the aggregate Metascore is read directly from
+    the movie page.  When it has 1–3 reviews Metacritic does not publish an
+    aggregate, so this function fetches the critic-reviews sub-page, parses
+    each individual score, and returns their rounded average.
 
     Args:
         title: Movie title.
@@ -151,8 +223,12 @@ def get_review_count(title: str, year: Optional[int] = None) -> int:
                API compatibility).
 
     Returns:
-        int: Critic review count (>= 0). Returns 0 when not found or on error.
+        dict with keys:
+            review_count (int):         >= 0; 0 when not found or on error.
+            metascore    (int | None):  0–100; None when unavailable.
     """
+    result: dict = {"review_count": 0, "metascore": None}
+
     # Build candidate slugs to try
     slug_no_article = _slugify(title)
     slug_with_article = _slugify_with_article(title)
@@ -161,25 +237,79 @@ def get_review_count(title: str, year: Optional[int] = None) -> int:
     if slug_with_article != slug_no_article:
         slugs.append(slug_with_article)
 
+    soup = None
+    matched_slug = None
+
     for slug in slugs:
         url = _MOVIE_URL.format(slug=slug)
         soup = _fetch(url)
-        if soup is None:
-            continue
-        count = _extract_review_count(soup)
-        if count is not None:
-            return count
-
-    # Fall back to search
-    logger.info("Metacritic: direct slug failed for '%s', trying search", title)
-    slug = _search_for_slug(title)
-    if slug:
-        url = _MOVIE_URL.format(slug=slug)
-        soup = _fetch(url)
         if soup is not None:
-            count = _extract_review_count(soup)
-            if count is not None:
-                return count
+            matched_slug = slug
+            break
 
-    logger.warning("Metacritic: could not find review count for '%s'", title)
-    return 0
+    if soup is None:
+        # Fall back to search
+        logger.info("Metacritic: direct slug failed for '%s', trying search", title)
+        matched_slug = _search_for_slug(title)
+        if matched_slug:
+            url = _MOVIE_URL.format(slug=matched_slug)
+            soup = _fetch(url)
+
+    if soup is None:
+        logger.warning("Metacritic: could not find page for '%s'", title)
+        return result
+
+    # --- review count ---
+    count = _extract_review_count(soup)
+    if count is not None:
+        result["review_count"] = count
+
+    # --- metascore ---
+    if result["review_count"] >= _MIN_REVIEWS_FOR_AGGREGATE:
+        # Aggregate score should be present on the main page
+        score = _extract_aggregate_score(soup)
+        if score is not None:
+            result["metascore"] = score
+        else:
+            logger.debug(
+                "Metacritic: aggregate score not found on main page for '%s' "
+                "(%d reviews)",
+                title,
+                result["review_count"],
+            )
+    elif result["review_count"] > 0:
+        # 1–3 reviews: average the individual scores from the reviews sub-page
+        logger.info(
+            "Metacritic: %d review(s) for '%s' — averaging individual scores",
+            result["review_count"],
+            title,
+        )
+        reviews_url = _REVIEWS_URL.format(slug=matched_slug)
+        reviews_soup = _fetch(reviews_url)
+        if reviews_soup is not None:
+            scores = _extract_individual_scores(reviews_soup)
+            if scores:
+                avg = round(sum(scores) / len(scores))
+                result["metascore"] = max(0, min(100, avg))
+                logger.info(
+                    "Metacritic: averaged %d individual score(s) → %d for '%s'",
+                    len(scores),
+                    result["metascore"],
+                    title,
+                )
+            else:
+                logger.warning(
+                    "Metacritic: could not parse individual scores for '%s'", title
+                )
+
+    return result
+
+
+def get_review_count(title: str, year: Optional[int] = None) -> int:
+    """
+    Backward-compatible wrapper around get_metacritic_data.
+
+    Returns only the critic review count.  Prefer get_metacritic_data for new
+    call sites so that the Metascore is also available.
+    """
+    return get_metacritic_data(title, year)["review_count"]
