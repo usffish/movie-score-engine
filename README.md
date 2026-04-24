@@ -12,26 +12,26 @@ A Python CLI tool that aggregates film scores from OMDb, Metacritic, and Letterb
 
 ## What it does
 
-For every title in a personal `Movies.xlsx` watchlist, the tool:
+For every title in a personal Movies.xlsx watchlist, the tool:
 
 1. Fetches **Metascore** and **IMDB rating** from the [OMDb API](http://www.omdbapi.com/)
 2. Scrapes **critic review count** (and Metascore fallback) from Metacritic
 3. Scrapes **average community rating** from Letterboxd
 4. Normalises all three scores column-wide using min-max scaling
 5. Computes a **review-count-weighted composite score** grounded in Bayesian statistics
-6. Writes results to `Movies_updated.xlsx`, leaving the original file untouched
+6. Writes results to Movies_updated.xlsx, leaving the original file untouched
 
 ---
 
 ## Highlights
 
-- **Three-pass pipeline** — fetch → normalise → composite. Normalisation is intentionally separated from the fetch loop because min-max scaling requires the full column to be known before any single value can be computed. When `--smart-update` skips stable movies, their existing raw scores are still included in the normalisation batch so the full distribution is always used.
+- **Three-pass pipeline** — fetch → normalise → composite. Normalisation is intentionally separated from the fetch loop because min-max scaling requires the full column to be known before any single value can be computed. When --smart-update skips stable movies, their existing raw scores are still included in the normalisation batch so the full distribution is always used.
 - **Bayesian-motivated weighting** — Metacritic's contribution to the composite scales with its critic review count, not a fixed coefficient. A score backed by 80 reviews carries more weight than the same score backed by 4. This is grounded in Laplace's rule of succession (see [Theory](#composite-score--theory) below).
 - **Dynamic denominator** — missing scores are dropped from both numerator and denominator rather than substituted with zeros, preserving the relative weighting of whichever sources are available.
 - **Resilient scraping** — all HTTP fetches retry up to 3 times with exponential back-off. Per-movie failures are logged and skipped; the rest of the batch continues.
 - **Data safety** — existing cell values are never overwritten by a missing result. The input workbook is never modified.
 - **Property-based test suite** — correctness properties (normalisation bounds, composite formula, ZeroDivisionError safety, global anchor computation) are verified with [Hypothesis](https://hypothesis.readthedocs.io/) across hundreds of generated inputs.
-- **Smart scheduling** — `--smart-update` tracks score stability over time and skips movies that haven't changed, reducing unnecessary network requests on repeat runs.
+- **Smart scheduling** — --smart-update tracks score stability over time and skips movies that haven't changed, reducing unnecessary network requests on repeat runs.
 
 ---
 
@@ -79,7 +79,7 @@ This is the central question in [3Blue1Brown's series on Bayesian statistics](ht
 
 ### Laplace's rule of succession
 
-When you observe `p` positive reviews out of `n` total, your best estimate of the true underlying success rate is not `p/n` but:
+When you observe p positive reviews out of n total, your best estimate of the true underlying success rate is not p/n but:
 
 ```
 (p + 1) / (n + 2)
@@ -105,13 +105,13 @@ This project applies the same logic: rather than giving Metacritic a fixed weigh
 
 ### Step 1 — Min-max normalisation
 
-The three sources use incompatible scales (0–100, 0–10, 0–5). Before combining them, each column is rescaled to `[0, 1]`:
+The three sources use incompatible scales (0–100, 0–10, 0–5). Before combining them, each column is rescaled to [0, 1]:
 
 ```
 st.X[i] = (X[i] − min(X)) / (max(X) − min(X))
 ```
 
-`min` and `max` are computed across the entire batch after all fetches complete — not per-movie. This is why the pipeline separates fetching from normalisation. The best movie in each column maps to `1.0`, the worst to `0.0`, and everything else falls proportionally in between.
+min and max are computed across the entire batch after all fetches complete — not per-movie. This is why the pipeline separates fetching from normalisation. The best movie in each column maps to 1.0, the worst to 0.0, and everything else falls proportionally in between.
 
 ### Step 2 — Review-count-weighted composite
 
@@ -122,13 +122,13 @@ TRUE = ((st.Metacritic × Reviews) + st.Letterboxd + Global_Max + Global_Min + s
 
 | Term | Weight | Rationale |
 |------|--------|-----------|
-| `st.Metacritic × Reviews` | `Reviews` | Metacritic's influence scales with critical coverage |
-| `st.Letterboxd` | `1` | Fixed unit weight |
-| `st.IMDB` | `1` | Fixed unit weight |
-| `Global_Max` | `1` | Batch anchor — highest normalised value across all columns |
-| `Global_Min` | `1` | Batch anchor — lowest normalised value across all columns |
+| st.Metacritic × Reviews | Reviews | Metacritic's influence scales with critical coverage |
+| st.Letterboxd | 1 | Fixed unit weight |
+| st.IMDB | 1 | Fixed unit weight |
+| Global_Max | 1 | Batch anchor — highest normalised value across all columns |
+| Global_Min | 1 | Batch anchor — lowest normalised value across all columns |
 
-The denominator is `Reviews + 4` (4 fixed-weight terms plus the variable Metacritic weight).
+The denominator is Reviews + 4 (4 fixed-weight terms plus the variable Metacritic weight).
 
 ### Dynamic denominator
 
@@ -136,11 +136,11 @@ Missing scores are dropped from both numerator and denominator, not substituted 
 
 | Condition | Effect on denominator |
 |-----------|----------------------|
-| `Reviews == 0` | Base denominator is 4 (Metacritic term dropped) |
-| `st.Letterboxd` is `None` | `− 1` |
-| `st.IMDB` is `None` | `− 1` |
-| Global anchors unavailable | `− 2` |
-| All terms missing | Return `None` |
+| Reviews == 0 | Base denominator is 4 (Metacritic term dropped) |
+| st.Letterboxd is None | − 1 |
+| st.IMDB is None | − 1 |
+| Global anchors unavailable | − 2 |
+| All terms missing | Return None |
 
 ---
 
@@ -191,21 +191,21 @@ python update_scores.py --delay 2.0
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--input PATH` | `Movies.xlsx` | Path to the input workbook |
-| `--output PATH` | `<stem>_updated.xlsx` | Path for the output workbook |
-| `--api-key KEY` | — | OMDb API key (overrides `OMDB_API_KEY` env var) |
-| `--limit N` | — | Pick N movies at random |
-| `--movie TITLE` | — | Process a single movie by exact title |
-| `--delay SECS` | `1.0` | Seconds between requests to each source |
-| `--verbose` | off | Enable debug-level logging |
-| `--smart-update` | off | Skip recently-stable movies |
-| `--manual` | off | Prompt for missing values interactively |
+| --input PATH | Movies.xlsx | Path to the input workbook |
+| --output PATH | \<stem\>_updated.xlsx | Path for the output workbook |
+| --api-key KEY | — | OMDb API key (overrides OMDB_API_KEY env var) |
+| --limit N | — | Pick N movies at random |
+| --movie TITLE | — | Process a single movie by exact title |
+| --delay SECS | 1.0 | Seconds between requests to each source |
+| --verbose | off | Enable debug-level logging |
+| --smart-update | off | Skip recently-stable movies |
+| --manual | off | Prompt for missing values interactively |
 
 ---
 
 ## Input format
 
-Place your watchlist in `Movies.xlsx` in the project root. The workbook must have a column named **`Movies`** with one title per row. All other columns are optional — the script adds any missing output columns automatically.
+Place your watchlist in Movies.xlsx in the project root. The workbook must have a column named **Movies** with one title per row. All other columns are optional — the script adds any missing output columns automatically.
 
 ---
 
@@ -213,16 +213,16 @@ Place your watchlist in `Movies.xlsx` in the project root. The workbook must hav
 
 | Column | Description |
 |--------|-------------|
-| `Metacritic` | Metascore (0–100) — Metacritic scrape, falls back to OMDb |
-| `st.Metacritic` | Min-max normalised Metascore (0.0–1.0) |
-| `Reviews` | Critic review count from Metacritic |
-| `Letterboxd` | Average community rating (0.0–5.0) |
-| `st.Letterboxd` | Min-max normalised Letterboxd rating (0.0–1.0) |
-| `IMDB` | IMDB rating (0.0–10.0) from OMDb |
-| `st.IMDB` | Min-max normalised IMDB rating (0.0–1.0) |
-| `TRUE` | Weighted composite score (0.0–1.0, rounded to 2 dp) |
-| `LastUpdated` | ISO date of last successful fetch (`YYYY-MM-DD`) |
-| `StableWeeks` | Consecutive weeks the composite stayed within ±0.05 |
+| Metacritic | Metascore (0–100) — Metacritic scrape, falls back to OMDb |
+| st.Metacritic | Min-max normalised Metascore (0.0–1.0) |
+| Reviews | Critic review count from Metacritic |
+| Letterboxd | Average community rating (0.0–5.0) |
+| st.Letterboxd | Min-max normalised Letterboxd rating (0.0–1.0) |
+| IMDB | IMDB rating (0.0–10.0) from OMDb |
+| st.IMDB | Min-max normalised IMDB rating (0.0–1.0) |
+| TRUE | Weighted composite score (0.0–1.0, rounded to 2 dp) |
+| LastUpdated | ISO date of last successful fetch (YYYY-MM-DD) |
+| StableWeeks | Consecutive weeks the composite stayed within ±0.05 |
 
 ---
 
