@@ -31,13 +31,11 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Three-pass pipeline** — fetch → normalise → composite. Normalisation is intentionally separated from the fetch loop because min-max scaling requires the full column to be known before any single value can be computed.
 - **Review-count-weighted composite** — Metacritic's contribution to the composite scales with its critic review count. A score backed by 80 reviews carries more weight than the same score backed by 4.
 - **Dynamic denominator** — missing scores are dropped from both numerator and denominator rather than substituted with zeros, preserving the relative weighting of whichever sources are available.
-- **Resilient scraping** — all HTTP fetches retry up to 3 times with exponential back-off. Per-movie failures are logged and skipped; the rest of the batch continues.
+- **Resilient scraping** — all HTTP fetches retry up to 3 times with exponential back-off behind a thread-safe per-domain rate limiter. Per-movie failures are logged and skipped; the rest of the batch continues.
 - **Data safety** — existing cell values are never overwritten by a missing result. The input workbook is never modified.
-- **Property-based test suite** — correctness properties (normalisation bounds, composite formula, ZeroDivisionError safety, global anchor computation) are verified with [Hypothesis](https://hypothesis.readthedocs.io/) across hundreds of generated inputs.
-- **Smart scheduling** — --smart-update tracks score stability over time and skips movies that haven't changed, reducing unnecessary network requests on repeat runs.
-- **AI-powered slug resolution** — optional Gemini API integration resolves hard-to-find movie slugs when local heuristics fail, without ever asking the AI for scores.
-- **Enhanced Gemini retry** — Gemini now helps with movies that fail ANY scraper (not just all 3), improving coverage for partially missing data.
-- **Accurate Metascore handling** — Returns `None` for N/A scores instead of defaulting to 50, ensuring movies with 1-3 reviews get proper individual score averaging from Metacritic.
+- **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
+- **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks.
+- **AI-powered slug resolution** — optional Gemini API integration resolves hard-to-find movie slugs as a last resort when local heuristics and site search both fail, without ever asking the AI for scores. Activates per-scraper, so a single failed source triggers a targeted retry rather than a full re-fetch.
 
 ---
 
@@ -53,7 +51,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 ├── Movies.xlsx               # Input watchlist (user-provided, not committed)
 ├── Movies_updated.xlsx       # Generated output (not committed)
 ├── scraper/
-│   ├── http.py               # Shared HTTP retry util + RateLimiter
+│   ├── http.py               # Shared HTTP retry util, RateLimiter, slugify()
 │   ├── omdb_client.py        # OMDb API client — Metascore + IMDB rating
 │   ├── metacritic_scraper.py # Scrapes critic review count (+ Metascore fallback)
 │   ├── letterboxd_scraper.py # Scrapes average community rating
