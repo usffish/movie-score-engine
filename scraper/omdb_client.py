@@ -8,10 +8,11 @@ OMDb API endpoint:
 """
 
 import logging
-import time
 from typing import Optional
 
 import requests
+
+from scraper.http import retry_get
 
 logger = logging.getLogger(__name__)
 
@@ -37,62 +38,14 @@ _FALLBACK = {
 }
 
 
-def _fetch(url: str, params: dict, retries: int = 3, backoff: float = 2.0, 
+def _fetch(url: str, params: dict, retries: int = 3, backoff: float = 2.0,
            rate_limiter=None, domain: str = "omdbapi.com") -> Optional[dict]:
-    """
-    GET the OMDb API and return the parsed JSON dict.
-
-    Retries up to `retries` times with exponential back-off on network errors
-    or non-200 HTTP responses.  Returns None after exhausting all attempts.
-    
-    If rate_limiter is provided, uses it to respect rate limits.
-    """
-    for attempt in range(retries):
-        try:
-            # Wait for rate limiter if provided
-            if rate_limiter:
-                rate_limiter.wait_if_needed(domain)
-            
-            resp = SESSION.get(url, params=params, timeout=15)
-            
-            # Check for rate limit errors
-            if resp.status_code == 429 or resp.status_code == 503:
-                logger.warning(
-                    "OMDb: Rate limit error HTTP %s for %s (attempt %d/%d)",
-                    resp.status_code,
-                    resp.url,
-                    attempt + 1,
-                    retries,
-                )
-                if rate_limiter:
-                    rate_limiter.increase_delay(domain)
-                # Wait longer before retry
-                time.sleep(backoff * (2 ** attempt) * 2)
-                continue
-                
-            if resp.status_code == 200:
-                # Success - gradually decrease delay if using rate limiter
-                if rate_limiter and attempt == 0:  # Only on first successful attempt
-                    rate_limiter.decrease_delay(domain)
-                return resp.json()
-                
-            logger.warning(
-                "OMDb: HTTP %s for %s (attempt %d/%d)",
-                resp.status_code,
-                resp.url,
-                attempt + 1,
-                retries,
-            )
-        except requests.RequestException as exc:
-            logger.warning(
-                "OMDb: request error (%s) (attempt %d/%d)",
-                exc,
-                attempt + 1,
-                retries,
-            )
-        if attempt < retries - 1:
-            time.sleep(backoff * (2 ** attempt))
-    return None
+    """GET the OMDb API and return the parsed JSON dict, or None on failure."""
+    resp = retry_get(
+        SESSION, url, params=params, retries=retries, backoff=backoff,
+        rate_limiter=rate_limiter, domain=domain, label="OMDb",
+    )
+    return resp.json() if resp is not None else None
 
 
 def _parse_metascore(value: Optional[str]) -> Optional[int]:
@@ -115,8 +68,8 @@ def _parse_imdb_rating(value: Optional[str]) -> Optional[float]:
         return None
 
 
-def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver=None, 
-                   rate_limiter=None) -> dict:
+def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver=None,
+                  rate_limiter=None) -> dict:
     """
     Fetch Metascore and IMDB rating for a movie from the OMDb API.
 
@@ -141,21 +94,20 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
     data = _fetch(_OMDB_URL, params, rate_limiter=rate_limiter, domain="omdbapi.com")
 
     if data is None:
-        # All retries exhausted — return fallbacks
         logger.warning("OMDb: all retries exhausted for '%s', returning fallbacks", title)
         return dict(_FALLBACK)
 
-    # OMDb signals "not found" with Response: "False"
     if data.get("Response") == "False":
         logger.warning("OMDb: movie not found for '%s': %s", title, data.get("Error", ""))
 
-        # Ask Gemini for the IMDb ID and retry with ?i= lookup
         if resolver is not None:
             logger.info("OMDb: asking Gemini for IMDb ID for '%s'", title)
             imdb_id = resolver.resolve_imdb_id(title)
             if imdb_id:
-                id_params: dict = {"i": imdb_id, "apikey": api_key}
-                id_data = _fetch(_OMDB_URL, id_params, rate_limiter=rate_limiter, domain="omdbapi.com")
+                id_data = _fetch(
+                    _OMDB_URL, {"i": imdb_id, "apikey": api_key},
+                    rate_limiter=rate_limiter, domain="omdbapi.com",
+                )
                 if id_data and id_data.get("Response") != "False":
                     logger.info("OMDb: Gemini resolved IMDb ID '%s' for '%s'", imdb_id, title)
                     return {
@@ -170,4 +122,25 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
         "metascore": _parse_metascore(data.get("Metascore")),
         "imdb_rating": _parse_imdb_rating(data.get("imdbRating")),
         "imdb_id": data.get("imdbID") or None,
+    }
+
+
+def get_omdb_data_with_id(api_key: str, imdb_id: Optional[str], rate_limiter=None) -> dict:
+    """
+    Fetch OMDb data using a pre-resolved IMDb ID.
+    Returns dict with metascore, imdb_rating, imdb_id.
+    """
+    if not imdb_id:
+        return dict(_FALLBACK)
+
+    data = _fetch(_OMDB_URL, {"i": imdb_id, "apikey": api_key},
+                  rate_limiter=rate_limiter, domain="omdbapi.com")
+
+    if data is None or data.get("Response") == "False":
+        return dict(_FALLBACK)
+
+    return {
+        "metascore": _parse_metascore(data.get("Metascore")),
+        "imdb_rating": _parse_imdb_rating(data.get("imdbRating")),
+        "imdb_id": data.get("imdbID") or imdb_id,
     }

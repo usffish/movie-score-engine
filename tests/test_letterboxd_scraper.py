@@ -169,7 +169,7 @@ class TestGetLetterboxdData(unittest.TestCase):
             "scraper.letterboxd_scraper.SESSION.get",
             side_effect=requests.ConnectionError("connection refused"),
         ):
-            with patch("scraper.letterboxd_scraper.time.sleep"):
+            with patch("scraper.http.time.sleep"):
                 result = get_letterboxd_data("Some Movie")
 
         self.assertIsNone(result["rating"])
@@ -181,7 +181,7 @@ class TestGetLetterboxdData(unittest.TestCase):
         """On persistent network errors, SESSION.get is called exactly 3 times per _fetch."""
         with patch("scraper.letterboxd_scraper.SESSION.get") as mock_get:
             mock_get.side_effect = requests.ConnectionError("connection refused")
-            with patch("scraper.letterboxd_scraper.time.sleep"):
+            with patch("scraper.http.time.sleep"):
                 result = get_letterboxd_data("Some Movie")
 
         # "Some Movie" has 3 slug candidates: some-movie, some-movie-1, some-movie-2
@@ -195,7 +195,7 @@ class TestGetLetterboxdData(unittest.TestCase):
         """Sleep is called between retries but not after the final attempt."""
         with patch("scraper.letterboxd_scraper.SESSION.get") as mock_get:
             mock_get.side_effect = requests.ConnectionError("fail")
-            with patch("scraper.letterboxd_scraper.time.sleep") as mock_sleep:
+            with patch("scraper.http.time.sleep") as mock_sleep:
                 get_letterboxd_data("Some Movie")
 
         # With retries=3, sleep is called after attempt 0 and attempt 1 (not after attempt 2).
@@ -207,7 +207,7 @@ class TestGetLetterboxdData(unittest.TestCase):
         """Sleep durations follow exponential back-off: backoff*1, backoff*2."""
         with patch("scraper.letterboxd_scraper.SESSION.get") as mock_get:
             mock_get.side_effect = requests.ConnectionError("fail")
-            with patch("scraper.letterboxd_scraper.time.sleep") as mock_sleep:
+            with patch("scraper.http.time.sleep") as mock_sleep:
                 get_letterboxd_data("Some Movie")
 
         sleep_args = [call.args[0] for call in mock_sleep.call_args_list]

@@ -140,7 +140,7 @@ class TestGetOmdbData(unittest.TestCase):
         mock_get = patcher.start()
         mock_get.side_effect = requests.ConnectionError("connection refused")
 
-        sleep_patcher = patch("scraper.omdb_client.time.sleep")
+        sleep_patcher = patch("scraper.http.time.sleep")
         sleep_patcher.start()
 
         try:
@@ -242,7 +242,7 @@ class TestGetOmdbData(unittest.TestCase):
         mock_get = patcher.start()
         mock_get.return_value = bad_resp
 
-        sleep_patcher = patch("scraper.omdb_client.time.sleep")
+        sleep_patcher = patch("scraper.http.time.sleep")
         sleep_patcher.start()
 
         try:
@@ -262,7 +262,7 @@ class TestGetOmdbData(unittest.TestCase):
         mock_get = patcher.start()
         mock_get.side_effect = requests.ConnectionError("fail")
 
-        sleep_patcher = patch("scraper.omdb_client.time.sleep")
+        sleep_patcher = patch("scraper.http.time.sleep")
         mock_sleep = sleep_patcher.start()
 
         try:

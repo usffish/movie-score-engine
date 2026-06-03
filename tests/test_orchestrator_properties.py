@@ -22,12 +22,8 @@ import openpyxl
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from update_scores import (
-    NormalisedScores,
-    RawScores,
-    fetch_all,
-    update_workbook,
-)
+from scoring import NormalisedScores, RawScores
+from update_scores import fetch_all, update_workbook
 
 # ---------------------------------------------------------------------------
 # Shared strategies

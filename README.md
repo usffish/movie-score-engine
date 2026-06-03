@@ -45,11 +45,15 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 
 ```
 .
-├── update_scores.py          # Orchestrator, three-pass pipeline, CLI entry point
+├── update_scores.py          # Thin orchestrator: fetch_all, update_workbook, CLI
+├── scoring.py                # Data models (RawScores, NormalisedScores) + scoring math
+├── excel.py                  # Workbook I/O, header management, stability tracking
+├── manual.py                 # Interactive prompts for missing score entry
 ├── requirements.txt
 ├── Movies.xlsx               # Input watchlist (user-provided, not committed)
 ├── Movies_updated.xlsx       # Generated output (not committed)
 ├── scraper/
+│   ├── http.py               # Shared HTTP retry util + RateLimiter
 │   ├── omdb_client.py        # OMDb API client — Metascore + IMDB rating
 │   ├── metacritic_scraper.py # Scrapes critic review count (+ Metascore fallback)
 │   ├── letterboxd_scraper.py # Scrapes average community rating

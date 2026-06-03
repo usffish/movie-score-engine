@@ -16,7 +16,7 @@ Design reference: Property 1 — Min-max normalisation correctness
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from update_scores import normalise_column
+from scoring import normalise_column
 
 
 # ---------------------------------------------------------------------------

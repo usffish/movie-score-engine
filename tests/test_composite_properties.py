@@ -13,7 +13,7 @@ Design reference:
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from update_scores import (
+from scoring import (
     NormalisedScores,
     compute_composite,
     compute_global_anchors,

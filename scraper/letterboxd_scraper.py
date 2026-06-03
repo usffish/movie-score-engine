@@ -10,12 +10,13 @@ where the slug is a URL-friendly version of the title.
 import json
 import logging
 import re
-import time
 import unicodedata
 from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
+
+from scraper.http import retry_get
 
 logger = logging.getLogger(__name__)
 
@@ -47,43 +48,17 @@ def _slugify(text: str) -> str:
 
 def _fetch(url: str, retries: int = 3, backoff: float = 2.0,
            rate_limiter=None, domain: str = "letterboxd.com") -> Optional[BeautifulSoup]:
-    """GET a URL and return a BeautifulSoup object, with retry logic and exponential back-off."""
-    for attempt in range(retries):
-        try:
-            # Wait for rate limiter if provided
-            if rate_limiter:
-                rate_limiter.wait_if_needed(domain)
-            
-            resp = SESSION.get(url, timeout=15)
-            
-            # Check for rate limit errors
-            if resp.status_code == 429 or resp.status_code == 503:
-                logger.warning("Letterboxd: Rate limit error HTTP %s for %s", resp.status_code, url)
-                if rate_limiter:
-                    rate_limiter.increase_delay(domain)
-                # Wait longer before retry
-                time.sleep(backoff * (2 ** attempt) * 2)
-                continue
-                
-            if resp.status_code == 200:
-                # Success - gradually decrease delay if using rate limiter
-                if rate_limiter and attempt == 0:  # Only on first successful attempt
-                    rate_limiter.decrease_delay(domain)
-                return BeautifulSoup(resp.text, "lxml")
-            if resp.status_code == 404:
-                return None
-            logger.warning("Letterboxd: HTTP %s for %s", resp.status_code, url)
-        except requests.RequestException as exc:
-            logger.warning("Letterboxd: request error (%s) for %s", exc, url)
-        # Only sleep between attempts, not after the last one
-        if attempt < retries - 1:
-            time.sleep(backoff * (2 ** attempt))
-    return None
+    """GET a URL and return a BeautifulSoup object, or None on failure/404."""
+    resp = retry_get(
+        SESSION, url, retries=retries, backoff=backoff,
+        rate_limiter=rate_limiter, domain=domain,
+        abort_on_404=True, label="Letterboxd",
+    )
+    return BeautifulSoup(resp.text, "lxml") if resp is not None else None
 
 
 def _parse_rating_from_soup(soup: BeautifulSoup) -> Optional[float]:
     """Extract the average rating from a Letterboxd film page."""
-    # Primary: <meta itemprop="ratingValue" content="X">
     meta = soup.find("meta", itemprop="ratingValue")
     if meta and meta.get("content"):
         try:
@@ -91,7 +66,6 @@ def _parse_rating_from_soup(soup: BeautifulSoup) -> Optional[float]:
         except ValueError:
             pass
 
-    # Secondary: JSON-LD aggregateRating block
     script = soup.find("script", type="application/ld+json")
     if script:
         try:
@@ -103,7 +77,6 @@ def _parse_rating_from_soup(soup: BeautifulSoup) -> Optional[float]:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Tertiary: <meta name="twitter:data2" content="3.85 out of 5">
     twitter_meta = soup.find("meta", attrs={"name": "twitter:data2"})
     if twitter_meta and twitter_meta.get("content"):
         content = twitter_meta["content"]
@@ -114,7 +87,6 @@ def _parse_rating_from_soup(soup: BeautifulSoup) -> Optional[float]:
             except ValueError:
                 pass
 
-    # Quaternary: <span class="average-rating"> or <span class="display-rating">
     for selector in ("span.average-rating", "span.display-rating"):
         tag = soup.select_one(selector)
         if tag:
@@ -158,10 +130,8 @@ def _search_for_slug(title: str, rate_limiter=None) -> Optional[str]:
     if soup is None:
         return None
 
-    # Search results list items contain links like /film/<slug>/
     results = soup.select("ul.results li.film-detail")
     if not results:
-        # Fallback selector
         results = soup.select("li.film-detail")
 
     title_lower = title.lower().strip()
@@ -171,13 +141,12 @@ def _search_for_slug(title: str, rate_limiter=None) -> Optional[str]:
             continue
         film_title_tag = item.select_one("h2.film-title, .film-title")
         film_title = film_title_tag.get_text(strip=True).lower() if film_title_tag else ""
-        href = link["href"]  # e.g. /film/boogie-nights/
+        href = link["href"]
         slug = href.strip("/").split("/")[-1]
 
         if film_title == title_lower:
             return slug
 
-    # If no exact match, return the first result's slug
     first = soup.select_one("a[href^='/film/']")
     if first:
         href = first["href"]
@@ -200,13 +169,12 @@ def _candidate_slugs(title: str, year: Optional[int] = None) -> list:
     candidates = [base]
     if year:
         candidates.append(f"{base}-{year}")
-    # Disambiguation suffixes Letterboxd uses when titles clash
     candidates.append(f"{base}-1")
     candidates.append(f"{base}-2")
     return candidates
 
 
-def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None, 
+def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
                         rate_limiter=None) -> dict:
     """
     Fetch Letterboxd average rating and rating count for a movie.
@@ -223,7 +191,6 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
     """
     result = {"rating": None, "rating_count": None, "url": None}
 
-    # Try each slug candidate in order before falling back to search
     for slug in _candidate_slugs(title, year):
         url = _FILM_URL.format(slug=slug)
         soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
@@ -233,7 +200,6 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
             result["rating_count"] = _parse_review_count_from_soup(soup)
             return result
 
-    # All direct slugs failed — fall back to Letterboxd search
     logger.info("Letterboxd: direct slugs failed for '%s', trying search", title)
     slug = _search_for_slug(title, rate_limiter=rate_limiter)
     if slug is not None:
@@ -245,7 +211,6 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
             result["rating_count"] = _parse_review_count_from_soup(soup)
             return result
 
-    # Site search also failed — ask Gemini as a last resort
     if resolver is not None:
         logger.info("Letterboxd: site search failed for '%s', asking Gemini", title)
         gemini_slug = resolver.resolve_letterboxd_slug(title)
@@ -261,3 +226,24 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
 
     logger.warning("Letterboxd: could not find '%s'", title)
     return result
+
+
+def get_letterboxd_data_with_slug(slug: Optional[str], rate_limiter=None) -> dict:
+    """
+    Fetch Letterboxd data using a pre-resolved slug.
+    Returns dict with rating, rating_count, and url.
+    """
+    if not slug:
+        return {"rating": None, "rating_count": None, "url": None}
+
+    url = _FILM_URL.format(slug=slug)
+    soup = _fetch(url, rate_limiter=rate_limiter)
+
+    if soup is None:
+        return {"rating": None, "rating_count": None, "url": None}
+
+    return {
+        "rating": _parse_rating_from_soup(soup),
+        "rating_count": _parse_review_count_from_soup(soup),
+        "url": url,
+    }

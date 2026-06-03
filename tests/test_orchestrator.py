@@ -24,9 +24,8 @@ from unittest.mock import patch
 import openpyxl
 import pytest
 
+from scoring import NormalisedScores, RawScores
 from update_scores import (
-    NormalisedScores,
-    RawScores,
     fetch_all,
     main,
     parse_args,

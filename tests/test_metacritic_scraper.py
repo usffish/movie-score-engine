@@ -171,7 +171,7 @@ class TestGetReviewCount(unittest.TestCase):
             "scraper.metacritic_scraper.SESSION.get",
             side_effect=requests.ConnectionError("connection refused"),
         ):
-            with patch("scraper.metacritic_scraper.time.sleep"):
+            with patch("scraper.http.time.sleep"):
                 result = get_review_count("Some Movie")
 
         self.assertEqual(result, 0)
@@ -224,7 +224,7 @@ class TestGetReviewCount(unittest.TestCase):
         """On persistent network errors, SESSION.get is called exactly 3 times per _fetch call."""
         with patch("scraper.metacritic_scraper.SESSION.get") as mock_get:
             mock_get.side_effect = requests.ConnectionError("connection refused")
-            with patch("scraper.metacritic_scraper.time.sleep"):
+            with patch("scraper.http.time.sleep"):
                 result = get_review_count("Some Movie")
 
         # "Some Movie" has no article, so only one slug variant.
@@ -238,7 +238,7 @@ class TestGetReviewCount(unittest.TestCase):
         """With an article title, retries 3 times for each of the two slug variants."""
         with patch("scraper.metacritic_scraper.SESSION.get") as mock_get:
             mock_get.side_effect = requests.ConnectionError("connection refused")
-            with patch("scraper.metacritic_scraper.time.sleep"):
+            with patch("scraper.http.time.sleep"):
                 result = get_review_count("The Matrix")
 
         # "The Matrix" has two slug variants: "matrix" and "the-matrix"
@@ -253,7 +253,7 @@ class TestGetReviewCount(unittest.TestCase):
         """Sleep is called between retries but not after the final attempt."""
         with patch("scraper.metacritic_scraper.SESSION.get") as mock_get:
             mock_get.side_effect = requests.ConnectionError("fail")
-            with patch("scraper.metacritic_scraper.time.sleep") as mock_sleep:
+            with patch("scraper.http.time.sleep") as mock_sleep:
                 get_review_count("Some Movie")
 
         # With retries=3, sleep is called after attempt 0 and attempt 1 (not after attempt 2).
