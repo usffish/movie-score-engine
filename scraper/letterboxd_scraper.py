@@ -10,13 +10,12 @@ where the slug is a URL-friendly version of the title.
 import json
 import logging
 import re
-import unicodedata
 from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
 
-from scraper.http import retry_get
+from scraper.http import retry_get, slugify as _slugify
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +34,6 @@ SESSION.headers.update(HEADERS)
 _SEARCH_URL = "https://letterboxd.com/search/films/{query}/"
 _FILM_URL = "https://letterboxd.com/film/{slug}/"
 
-
-def _slugify(text: str) -> str:
-    """Convert a title to a Letterboxd-style URL slug."""
-    text = unicodedata.normalize("NFKD", text)
-    text = text.encode("ascii", "ignore").decode("ascii")
-    text = text.lower()
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"[\s_]+", "-", text).strip("-")
-    return text
 
 
 def _fetch(url: str, retries: int = 3, backoff: float = 2.0,

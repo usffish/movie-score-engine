@@ -20,7 +20,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from scraper.http import retry_get
+from scraper.http import retry_get, slugify as _slugify_base
 
 logger = logging.getLogger(__name__)
 
@@ -48,24 +48,14 @@ _MIN_REVIEWS_FOR_AGGREGATE = 4
 
 
 def _slugify(text: str) -> str:
-    """Convert a title to a Metacritic-style URL slug (strips leading articles)."""
-    text = unicodedata.normalize("NFKD", text)
-    text = text.encode("ascii", "ignore").decode("ascii")
-    text = text.lower()
-    text = re.sub(r"^(the|a|an)\s+", "", text)
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"[\s_]+", "-", text).strip("-")
-    return text
+    """Metacritic-style slug: strips leading articles before hyphenating."""
+    text = re.sub(r"^(the|a|an)\s+", "", text.lower().strip())
+    return _slugify_base(text)
 
 
 def _slugify_with_article(text: str) -> str:
-    """Slugify keeping leading articles."""
-    text = unicodedata.normalize("NFKD", text)
-    text = text.encode("ascii", "ignore").decode("ascii")
-    text = text.lower()
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"[\s_]+", "-", text).strip("-")
-    return text
+    """Slug keeping leading articles (fallback candidate)."""
+    return _slugify_base(text)
 
 
 def _fetch(url: str, retries: int = 3, backoff: float = 2.5,
@@ -250,6 +240,18 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
         logger.warning("Metacritic: could not find page for '%s'", title)
         return result
 
+    return _extract_scores_from_soup(soup, matched_slug, rate_limiter, label=title)
+
+
+def _extract_scores_from_soup(soup, slug: str, rate_limiter=None, label: str = "") -> dict:
+    """
+    Extract review_count and metascore from an already-fetched movie page.
+
+    Handles both the aggregate path (4+ reviews) and the individual-score
+    averaging path (1–3 reviews).  *label* is used only for log messages.
+    """
+    result: dict = {"review_count": 0, "metascore": None}
+
     count = _extract_review_count(soup)
     if count is not None:
         result["review_count"] = count
@@ -258,29 +260,31 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
         score = _extract_aggregate_score(soup)
         if score is not None:
             result["metascore"] = score
-        else:
+        elif label:
             logger.debug(
                 "Metacritic: aggregate score not found on main page for '%s' (%d reviews)",
-                title, result["review_count"],
+                label, result["review_count"],
             )
     elif result["review_count"] > 0:
-        logger.info(
-            "Metacritic: %d review(s) for '%s' — averaging individual scores",
-            result["review_count"], title,
-        )
-        reviews_url = _REVIEWS_URL.format(slug=matched_slug)
+        if label:
+            logger.info(
+                "Metacritic: %d review(s) for '%s' — averaging individual scores",
+                result["review_count"], label,
+            )
+        reviews_url = _REVIEWS_URL.format(slug=slug)
         reviews_soup = _fetch(reviews_url, rate_limiter=rate_limiter, domain="metacritic.com")
         if reviews_soup is not None:
             scores = _extract_individual_scores(reviews_soup)
             if scores:
                 avg = round(sum(scores) / len(scores))
                 result["metascore"] = max(0, min(100, avg))
-                logger.info(
-                    "Metacritic: averaged %d individual score(s) → %d for '%s'",
-                    len(scores), result["metascore"], title,
-                )
-            else:
-                logger.warning("Metacritic: could not parse individual scores for '%s'", title)
+                if label:
+                    logger.info(
+                        "Metacritic: averaged %d individual score(s) → %d for '%s'",
+                        len(scores), result["metascore"], label,
+                    )
+            elif label:
+                logger.warning("Metacritic: could not parse individual scores for '%s'", label)
 
     return result
 
@@ -293,32 +297,13 @@ def get_metacritic_data_with_slug(slug: Optional[str], rate_limiter=None) -> dic
     if not slug:
         return {"review_count": 0, "metascore": None}
 
-    result: dict = {"review_count": 0, "metascore": None}
-
     url = _MOVIE_URL.format(slug=slug)
     soup = _fetch(url, rate_limiter=rate_limiter)
 
     if soup is None:
-        return result
+        return {"review_count": 0, "metascore": None}
 
-    count = _extract_review_count(soup)
-    if count is not None:
-        result["review_count"] = count
-
-    if result["review_count"] >= _MIN_REVIEWS_FOR_AGGREGATE:
-        score = _extract_aggregate_score(soup)
-        if score is not None:
-            result["metascore"] = score
-    elif result["review_count"] > 0:
-        reviews_url = _REVIEWS_URL.format(slug=slug)
-        reviews_soup = _fetch(reviews_url, rate_limiter=rate_limiter)
-        if reviews_soup is not None:
-            scores = _extract_individual_scores(reviews_soup)
-            if scores:
-                avg = round(sum(scores) / len(scores))
-                result["metascore"] = max(0, min(100, avg))
-
-    return result
+    return _extract_scores_from_soup(soup, slug, rate_limiter)
 
 
 def get_review_count(title: str, year: Optional[int] = None, resolver=None) -> int:

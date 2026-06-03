@@ -277,11 +277,24 @@ def should_update(ws, ws_row: int, header_map: dict, today: date) -> bool:
     return days_since >= stable_weeks * 7
 
 
+def read_prev_composite(ws, ws_row: int, header_map: dict) -> Optional[float]:
+    """Read the current TRUE composite value from a workbook row (before overwriting)."""
+    true_col = header_map.get("TRUE")
+    if not true_col:
+        return None
+    raw = ws.cell(row=ws_row, column=true_col).value
+    try:
+        return float(raw) if raw is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
 def update_stability(
     ws,
     ws_row: int,
     header_map: dict,
     new_composite: Optional[float],
+    prev_composite: Optional[float],
     today: date,
     manual_unchanged: bool = False,
 ) -> None:
@@ -290,18 +303,12 @@ def update_stability(
 
     StableWeeks increments by 1 if the new composite is within ±0.05 of the
     previous value; resets to 0 if it changed more than that.
+
+    *prev_composite* must be read from the workbook BEFORE the new scores are
+    written — the caller is responsible for this ordering.
     """
     lu_col = header_map.get("LastUpdated")
     sw_col = header_map.get("StableWeeks")
-
-    true_col = header_map.get("TRUE")
-    prev_composite = None
-    if true_col:
-        raw = ws.cell(row=ws_row, column=true_col).value
-        try:
-            prev_composite = float(raw) if raw is not None else None
-        except (ValueError, TypeError):
-            pass
 
     _, prev_stable_weeks = _read_stability(ws, ws_row, header_map)
 

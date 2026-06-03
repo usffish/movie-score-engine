@@ -1,11 +1,13 @@
 """
 scraper/http.py
 ===============
-Shared HTTP fetch utility: retry loop, adaptive rate limiting.
+Shared HTTP fetch utility: retry loop, adaptive rate limiting, slug helpers.
 """
 
 import logging
+import re
 import time
+import unicodedata
 from collections import defaultdict
 from threading import Lock
 from typing import Optional
@@ -13,6 +15,16 @@ from typing import Optional
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def slugify(text: str) -> str:
+    """Convert a title to a hyphenated ASCII slug (shared base for all scrapers)."""
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_]+", "-", text).strip("-")
+    return text
 
 
 class RateLimiter:
@@ -51,11 +63,10 @@ class RateLimiter:
     def wait_if_needed(self, domain: str):
         with self.lock:
             now = time.time()
-            last = self.last_request_time.get(domain, 0)
-            delay_needed = self.domain_delays[domain]
-            time_since_last = now - last
-            if time_since_last < delay_needed:
-                time.sleep(delay_needed - time_since_last)
+            sleep_time = max(0.0, self.domain_delays[domain] - (now - self.last_request_time.get(domain, 0)))
+        if sleep_time:
+            time.sleep(sleep_time)
+        with self.lock:
             self.last_request_time[domain] = time.time()
 
 

@@ -53,6 +53,7 @@ from excel import (
     load_workbook_from_path,
     migrate_stability_columns,
     read_existing_scores,
+    read_prev_composite,
     should_update,
     update_stability,
 )
@@ -133,21 +134,24 @@ def fetch_all(
                 letterboxd_rating=lb.get("rating"),
             ))
 
-            omdb_failed = omdb.get("imdb_rating") is None
-            mc_failed = mc.get("review_count", 0) == 0 and metascore is None
-            lb_failed = lb.get("rating") is None
-
-            if omdb_failed or mc_failed or lb_failed:
-                failed_for_retry.append(title)
+            if resolver is not None:
+                omdb_failed = omdb.get("imdb_rating") is None
+                mc_failed = mc.get("review_count", 0) == 0 and metascore is None
+                lb_failed = lb.get("rating") is None
+                if omdb_failed or mc_failed or lb_failed:
+                    failed_for_retry.append(title)
 
         except Exception as exc:
             logger.error("Failed to fetch scores for '%s': %s", title, exc)
             failed.append(title)
-            failed_for_retry.append(title)
+            if resolver is not None:
+                failed_for_retry.append(title)
             continue
 
     if failed_for_retry and resolver is not None:
         logger.info("Retrying %d movie(s) with Gemini slug resolution", len(failed_for_retry))
+
+        raw_scores_index = {r.title: i for i, r in enumerate(raw_scores)}
 
         for title in tqdm(failed_for_retry, desc="Retrying with Gemini", unit="movie"):
             logger.info("Resolving slugs for: %s", title)
@@ -157,10 +161,9 @@ def fetch_all(
                 gemini_letterboxd_slug = gemini_ids["letterboxd_slug"]
                 gemini_imdb_id = gemini_ids["imdb_id"]
 
-                existing_idx = next(
-                    (i for i, r in enumerate(raw_scores) if r.title == title), None
-                )
+                existing_idx = raw_scores_index.get(title)
                 if existing_idx is None:
+                    existing_idx = len(raw_scores)
                     raw_scores.append(RawScores(
                         title=title,
                         metascore=None,
@@ -168,7 +171,7 @@ def fetch_all(
                         review_count=0,
                         letterboxd_rating=None,
                     ))
-                    existing_idx = len(raw_scores) - 1
+                    raw_scores_index[title] = existing_idx
 
                 existing = raw_scores[existing_idx]
 
@@ -356,6 +359,10 @@ def update_workbook(
         ns = scores_by_title.get(title)
         if ns is None:
             continue
+
+        # Read before writing — update_stability needs the old value for comparison.
+        prev_comp = read_prev_composite(ws, ws_row, header_map)
+
         for col_name, field_name in SCORE_COLUMN_MAP.items():
             value = getattr(ns, field_name)
             if value is None:
@@ -365,7 +372,7 @@ def update_workbook(
                 ws.cell(row=ws_row, column=col_idx, value=value)
 
         is_unchanged = title in manual_unchanged
-        update_stability(ws, ws_row, header_map, ns.composite, today, manual_unchanged=is_unchanged)
+        update_stability(ws, ws_row, header_map, ns.composite, prev_comp, today, manual_unchanged=is_unchanged)
 
     extend_table_to_stability_cols(ws)
 
