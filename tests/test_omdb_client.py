@@ -2,7 +2,7 @@
 Unit tests for scraper/omdb_client.py.
 
 Covers:
-- "N/A" Metascore → 50
+- "N/A" Metascore → None
 - "N/A" imdbRating → None
 - Response: "False" → fallback values
 - Retry count exactly 3 on network failure
@@ -31,14 +31,14 @@ class TestParseMetascore(unittest.TestCase):
     def test_valid_integer_string(self):
         self.assertEqual(_parse_metascore("75"), 75)
 
-    def test_na_returns_50(self):
-        self.assertEqual(_parse_metascore("N/A"), 50)
+    def test_na_returns_none(self):
+        self.assertIsNone(_parse_metascore("N/A"))
 
-    def test_none_returns_50(self):
-        self.assertEqual(_parse_metascore(None), 50)
+    def test_none_returns_none(self):
+        self.assertIsNone(_parse_metascore(None))
 
-    def test_empty_string_returns_50(self):
-        self.assertEqual(_parse_metascore(""), 50)
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(_parse_metascore(""))
 
     def test_zero_string(self):
         self.assertEqual(_parse_metascore("0"), 0)
@@ -80,9 +80,9 @@ class TestGetOmdbData(unittest.TestCase):
         return patcher, mock_get
 
     # ------------------------------------------------------------------
-    # N/A Metascore → 50
+    # N/A Metascore → None
     # ------------------------------------------------------------------
-    def test_na_metascore_returns_50(self):
+    def test_na_metascore_returns_none(self):
         resp = _make_response({
             "Response": "True",
             "Metascore": "N/A",
@@ -92,7 +92,7 @@ class TestGetOmdbData(unittest.TestCase):
         patcher, _ = self._patch_session_get(return_value=resp)
         try:
             result = get_omdb_data("Some Movie", "testkey")
-            self.assertEqual(result["metascore"], 50)
+            self.assertIsNone(result["metascore"])
             self.assertAlmostEqual(result["imdb_rating"], 7.5)
         finally:
             patcher.stop()
@@ -126,7 +126,7 @@ class TestGetOmdbData(unittest.TestCase):
         patcher, _ = self._patch_session_get(return_value=resp)
         try:
             result = get_omdb_data("Unknown Movie", "testkey")
-            self.assertEqual(result["metascore"], 50)
+            self.assertIsNone(result["metascore"])
             self.assertIsNone(result["imdb_rating"])
             self.assertIsNone(result["imdb_id"])
         finally:
@@ -148,7 +148,7 @@ class TestGetOmdbData(unittest.TestCase):
             # Should have attempted exactly 3 times
             self.assertEqual(mock_get.call_count, 3)
             # Should return fallbacks after exhaustion
-            self.assertEqual(result["metascore"], 50)
+            self.assertIsNone(result["metascore"])
             self.assertIsNone(result["imdb_rating"])
             self.assertIsNone(result["imdb_id"])
         finally:
@@ -248,7 +248,7 @@ class TestGetOmdbData(unittest.TestCase):
         try:
             result = get_omdb_data("Some Movie", "testkey")
             self.assertEqual(mock_get.call_count, 3)
-            self.assertEqual(result["metascore"], 50)
+            self.assertIsNone(result["metascore"])
             self.assertIsNone(result["imdb_rating"])
         finally:
             patcher.stop()

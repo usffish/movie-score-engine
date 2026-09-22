@@ -171,7 +171,7 @@ def test_metacritic_sleep_durations_are_monotonically_increasing(title: str):
     """
     with patch("scraper.metacritic_scraper.SESSION.get") as mock_get:
         mock_get.side_effect = _requests.ConnectionError("fail")
-        with patch("scraper.metacritic_scraper.time.sleep") as mock_sleep:
+        with patch("scraper.http.time.sleep") as mock_sleep:
             _get_review_count_meta(title)
 
     sleep_calls = mock_sleep.call_args_list
@@ -208,7 +208,7 @@ def test_letterboxd_sleep_durations_are_monotonically_increasing(title: str):
     """
     with patch("scraper.letterboxd_scraper.SESSION.get") as mock_get:
         mock_get.side_effect = _requests.ConnectionError("fail")
-        with patch("scraper.letterboxd_scraper.time.sleep") as mock_sleep:
+        with patch("scraper.http.time.sleep") as mock_sleep:
             _get_letterboxd_data_lb(title)
 
     sleep_calls = mock_sleep.call_args_list
