@@ -4,10 +4,11 @@ manual.py
 Interactive prompts for filling in missing scores manually.
 """
 
+import dataclasses
 import logging
 from typing import Optional
 
-from scoring import RawScores
+from scoring import RawScores, format_source_years
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,15 @@ def _prompt_value(prompt: str, parser, label: str):
 
     Returns None if the user presses Enter without typing anything (skip).
     Loops until a valid value is entered or the user skips.
+    End of input (no terminal attached, or Ctrl-Z/Ctrl-D) is treated like
+    Ctrl-C, so callers stop prompting and keep what was entered.
     """
     while True:
-        raw = input(prompt).strip()
+        try:
+            # Windows PowerShell prefixes piped stdin with a BOM.
+            raw = input(prompt).lstrip("﻿").strip()
+        except EOFError:
+            raise KeyboardInterrupt from None
         if raw == "":
             return None
         try:
@@ -87,8 +94,8 @@ def prompt_missing_scores(
     letterboxd_rating = raw.letterboxd_rating
 
     def snapshot() -> RawScores:
-        return RawScores(
-            title=raw.title,
+        return dataclasses.replace(
+            raw,
             metascore=metascore,
             imdb_rating=imdb_rating,
             review_count=review_count,
@@ -163,6 +170,41 @@ def prompt_failed_movie(
     if result is None:
         logger.info("Skipped manual entry for '%s'", title)
     return result
+
+
+def prompt_unknown_years(raw_scores: list[RawScores]) -> tuple[dict, bool]:
+    """
+    Ask for the release year of every movie whose year is unknown — the
+    sources disagreed about which film it is, or none reported a year.
+
+    Shows what each source matched as a hint.  Blank input skips a movie.
+
+    Returns:
+        (years, interrupted) where years maps title -> entered year, and
+        interrupted is True when the user Ctrl-C'd (entries so far are kept).
+    """
+    unknown = [r for r in raw_scores if r.year is None]
+    years: dict = {}
+    if not unknown:
+        return years, False
+
+    total = len(unknown)
+    print(f"\n  ── Release year unknown for {total} movie(s) ──")
+    print("  The sources may have matched different films. Enter the year you mean,")
+    print("  and the movie is re-fetched with it. (Enter to skip, Ctrl-C to stop)\n")
+
+    for position, raw in enumerate(unknown, start=1):
+        print(f"  {raw.title}{_progress_label(position, total)}")
+        print(f"    found: {format_source_years(raw.source_years)}")
+        try:
+            year = _prompt_int_in_range("    Release year: ", 1870, 2100, "year")
+        except KeyboardInterrupt:
+            print(f"\n  Year entry stopped — keeping {len(years)} year(s) entered.\n")
+            return years, True
+        if year is not None:
+            years[raw.title] = year
+
+    return years, False
 
 
 def _manual_matches_existing(new: RawScores, prev: RawScores) -> bool:

@@ -33,6 +33,7 @@ Output columns added / updated
 """
 
 import argparse
+import dataclasses
 import logging
 import os
 import random
@@ -58,7 +59,7 @@ from excel import (
     should_update,
     update_stability,
 )
-from manual import apply_manual_entry
+from manual import apply_manual_entry, prompt_unknown_years
 from scoring import (
     NormalisedScores,
     RawScores,
@@ -67,6 +68,8 @@ from scoring import (
     normalise_column,
     compute_composite,
     compute_global_anchors,
+    format_source_years,
+    resolve_year,
 )
 from scraper.http import RateLimiter
 from scraper.gemini_resolver import GeminiResolver
@@ -133,12 +136,27 @@ def fetch_all(
             omdb_metascore = omdb.get("metascore") if omdb.get("imdb_id") else None
             metascore = scraped_metascore if scraped_metascore is not None else omdb_metascore
 
+            source_years = {
+                "Metacritic": mc.get("year"),
+                "Letterboxd": lb.get("year"),
+                "OMDb": omdb.get("year"),
+            }
+            resolved_year = resolve_year(year, source_years)
+            if year is None and resolved_year is None and any(source_years.values()):
+                logger.warning(
+                    "Year: sources matched different films for '%s' (%s) — "
+                    "set the Year column to pick one",
+                    title, format_source_years(source_years),
+                )
+
             raw_scores.append(RawScores(
                 title=title,
                 metascore=metascore,
                 imdb_rating=omdb.get("imdb_rating"),
                 review_count=mc.get("review_count", 0),
                 letterboxd_rating=lb.get("rating"),
+                year=resolved_year,
+                source_years=source_years,
             ))
 
             if resolver is not None:
@@ -181,10 +199,12 @@ def fetch_all(
                     raw_scores_index[title] = existing_idx
 
                 existing = raw_scores[existing_idx]
+                source_years = dict(existing.source_years)
 
                 if existing.imdb_rating is None and gemini_imdb_id:
                     omdb = get_omdb_data_with_id(api_key, gemini_imdb_id, rate_limiter=rate_limiter)
                     imdb_rating = omdb.get("imdb_rating")
+                    source_years["OMDb"] = omdb.get("year")
                 else:
                     imdb_rating = existing.imdb_rating
 
@@ -192,6 +212,7 @@ def fetch_all(
                     mc = get_metacritic_data_with_slug(gemini_metacritic_slug, rate_limiter=rate_limiter)
                     metascore = mc.get("metascore")
                     review_count = mc.get("review_count", 0)
+                    source_years["Metacritic"] = mc.get("year")
                 else:
                     metascore = existing.metascore
                     review_count = existing.review_count
@@ -199,6 +220,7 @@ def fetch_all(
                 if existing.letterboxd_rating is None and gemini_letterboxd_slug:
                     lb = get_letterboxd_data_with_slug(gemini_letterboxd_slug, rate_limiter=rate_limiter)
                     letterboxd_rating = lb.get("rating")
+                    source_years["Letterboxd"] = lb.get("year")
                 else:
                     letterboxd_rating = existing.letterboxd_rating
 
@@ -208,6 +230,8 @@ def fetch_all(
                     imdb_rating=imdb_rating,
                     review_count=review_count,
                     letterboxd_rating=letterboxd_rating,
+                    year=resolve_year(years.get(title), source_years),
+                    source_years=source_years,
                 )
 
             except Exception as exc:
@@ -329,9 +353,27 @@ def update_workbook(
         resolver=resolver, rate_limiter=rate_limiter, years=years,
     )
 
+    prompt_scores = manual
+    if manual:
+        entered_years, interrupted = prompt_unknown_years(raw_scores)
+        if entered_years:
+            years.update(entered_years)
+            refetched, _ = fetch_all(
+                list(entered_years), api_key=api_key, delay=delay, verbose=verbose,
+                resolver=resolver, rate_limiter=rate_limiter, years=entered_years,
+            )
+            by_title = {r.title: r for r in refetched}
+            raw_scores = [
+                by_title.get(r.title, dataclasses.replace(r, year=entered_years.get(r.title, r.year)))
+                for r in raw_scores
+            ]
+        # Ctrl-C during the year prompts stops all prompting, not just years.
+        prompt_scores = not interrupted
+
     raw_scores, failed, manual_unchanged = apply_manual_entry(
-        raw_scores, failed, manual=manual, existing=existing_scores
+        raw_scores, failed, manual=prompt_scores, existing=existing_scores
     )
+    year_by_title = {r.title: r.year for r in raw_scores}
 
     fetched_titles = {r.title for r in raw_scores}
 
@@ -379,6 +421,12 @@ def update_workbook(
             col_idx = header_map.get(col_name)
             if col_idx:
                 ws.cell(row=ws_row, column=col_idx, value=value)
+
+        # Record the release year the scores were matched to, so a wrong film
+        # is easy to spot.  Unknown years leave the cell as it was.
+        year = year_by_title.get(title)
+        if year is not None and header_map.get("Year"):
+            ws.cell(row=ws_row, column=header_map["Year"], value=year)
 
         is_unchanged = title in manual_unchanged
         update_stability(ws, ws_row, header_map, ns.composite, prev_comp, today, manual_unchanged=is_unchanged)

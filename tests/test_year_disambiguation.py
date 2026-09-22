@@ -2,9 +2,12 @@
 Tests for release-year disambiguation.
 
 Covers:
-- Letterboxd tries the year-suffixed slug before the plain slug
-- Letterboxd skips a page whose release year doesn't match
+- Letterboxd / Metacritic try the year-suffixed slug before the plain slug
+- Letterboxd / Metacritic skip a page whose release year doesn't match
 - read_years parses the optional Year column
+- resolve_year: user year wins, agreeing sources fill it, disagreement = unknown
+- --manual asks for unknown years, re-fetches with them, and stops on EOF
+- the matched year is written to the output Year column
 """
 
 import unittest
@@ -90,6 +93,56 @@ class TestLetterboxdYear(unittest.TestCase):
         self.assertEqual(result["rating"], 2.4)
 
 
+def _mc_page(date_published: str, score: int, reviews: int) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.text = f"""
+    <html><head><script type="application/ld+json">
+    {{"@type": "Movie", "datePublished": "{date_published}",
+      "aggregateRating": {{"ratingValue": {score}, "reviewCount": {reviews}}}}}
+    </script></head><body></body></html>
+    """
+    return resp
+
+
+class TestMetacriticYear(unittest.TestCase):
+
+    def _fake_get(self, pages):
+        def get(url, **kwargs):
+            return pages.get(url, _not_found())
+        return get
+
+    def _get(self, pages, title, year=None):
+        from scraper.metacritic_scraper import get_metacritic_data
+        with patch("scraper.metacritic_scraper.SESSION.get", side_effect=self._fake_get(pages)):
+            return get_metacritic_data(title, year=year)
+
+    def test_year_suffixed_page_is_used(self):
+        pages = {
+            "https://www.metacritic.com/movie/buddy-2026/": _mc_page("2026-08-28", 67, 22),
+            "https://www.metacritic.com/movie/buddy/": _mc_page("2019-03-20", 76, 4),
+        }
+        self.assertEqual(self._get(pages, "Buddy", 2026), {"review_count": 22, "metascore": 67, "year": 2026})
+
+    def test_wrong_year_plain_slug_is_rejected(self):
+        pages = {
+            "https://www.metacritic.com/movie/buddy/": _mc_page("2019-03-20", 76, 4),
+        }
+        self.assertEqual(self._get(pages, "Buddy", 2026), {"review_count": 0, "metascore": None, "year": None})
+
+    def test_plain_slug_used_when_year_matches(self):
+        pages = {
+            "https://www.metacritic.com/movie/godfather/": _mc_page("1972-03-24", 100, 16),
+        }
+        self.assertEqual(self._get(pages, "The Godfather", 1972), {"review_count": 16, "metascore": 100, "year": 1972})
+
+    def test_no_year_keeps_old_behaviour(self):
+        pages = {
+            "https://www.metacritic.com/movie/buddy/": _mc_page("2019-03-20", 76, 4),
+        }
+        self.assertEqual(self._get(pages, "Buddy"), {"review_count": 4, "metascore": 76, "year": 2019})
+
+
 class TestReadYears(unittest.TestCase):
 
     def _sheet(self, rows):
@@ -116,6 +169,138 @@ class TestReadYears(unittest.TestCase):
             read_years(ws, get_header_map(ws), rows),
             {"Parasite": 2019, "Boogie Nights": 1997},
         )
+
+
+class TestResolveYear(unittest.TestCase):
+
+    def test_given_year_always_wins(self):
+        from scoring import resolve_year
+        self.assertEqual(resolve_year(2026, {"Metacritic": 2019, "OMDb": 2019}), 2026)
+
+    def test_agreeing_sources_prefer_omdb(self):
+        from scoring import resolve_year
+        self.assertEqual(
+            resolve_year(None, {"Metacritic": 2025, "Letterboxd": 2025, "OMDb": 2026}), 2026
+        )
+
+    def test_disagreeing_sources_are_unknown(self):
+        from scoring import resolve_year
+        self.assertIsNone(
+            resolve_year(None, {"Metacritic": 2019, "Letterboxd": 2019, "OMDb": 2026})
+        )
+
+    def test_missing_sources_are_ignored(self):
+        from scoring import resolve_year
+        self.assertEqual(resolve_year(None, {"Metacritic": None, "Letterboxd": 2002}), 2002)
+        self.assertIsNone(resolve_year(None, {"Metacritic": None}))
+
+
+class TestPromptUnknownYears(unittest.TestCase):
+
+    def _raw(self, title, year=None, source_years=None):
+        from scoring import RawScores
+        return RawScores(title, 70, 7.0, 10, 3.5, year=year, source_years=source_years or {})
+
+    def test_asks_only_for_unknown_years(self):
+        from manual import prompt_unknown_years
+        raws = [
+            self._raw("Buddy", None, {"Metacritic": 2019, "OMDb": 2026}),
+            self._raw("Hope", None, {"Metacritic": 2021, "OMDb": 2013}),
+            self._raw("Known", 2020),
+        ]
+        with patch("builtins.input", side_effect=["2026", ""]) as mock_input, \
+             patch("builtins.print"):
+            years, interrupted = prompt_unknown_years(raws)
+        self.assertEqual(years, {"Buddy": 2026})
+        self.assertFalse(interrupted)
+        self.assertEqual(mock_input.call_count, 2)
+
+    def test_end_of_input_stops_and_keeps_entries(self):
+        from manual import prompt_unknown_years
+        raws = [self._raw("Buddy"), self._raw("Hope")]
+        with patch("builtins.input", side_effect=["2026", EOFError]), patch("builtins.print"):
+            years, interrupted = prompt_unknown_years(raws)
+        self.assertEqual(years, {"Buddy": 2026})
+        self.assertTrue(interrupted)
+
+    def test_score_prompt_end_of_input_keeps_year(self):
+        from manual import prompt_missing_scores, ManualEntryInterrupted
+        raw = self._raw("Buddy", 2026, {"OMDb": 2026})
+        raw.imdb_rating = None
+        with patch("builtins.input", side_effect=EOFError), patch("builtins.print"):
+            with self.assertRaises(ManualEntryInterrupted) as ctx:
+                prompt_missing_scores(raw)
+        self.assertEqual(ctx.exception.partial.year, 2026)
+
+
+class TestWorkbookYear(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.input = self.tmp / "in.xlsx"
+        self.output = self.tmp / "out.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Movies"])
+        ws.append(["Buddy"])
+        ws.append(["Resident Evil"])
+        wb.save(self.input)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _output_years(self):
+        ws = openpyxl.load_workbook(self.output).active
+        hm = get_header_map(ws)
+        return {ws.cell(r, hm["Movies"]).value: ws.cell(r, hm["Year"]).value
+                for r in range(2, ws.max_row + 1)}
+
+    def _fake_fetch_all(self, calls):
+        from scoring import RawScores
+
+        def fetch_all(movies, api_key, delay=0.0, verbose=False, resolver=None,
+                      rate_limiter=None, years=None):
+            years = years or {}
+            calls.append((list(movies), dict(years)))
+            out = []
+            for t in movies:
+                if t == "Buddy" and years.get(t) == 2026:
+                    out.append(RawScores(t, 67, 7.1, 22, 3.09, year=2026,
+                                         source_years={"Metacritic": 2026, "OMDb": 2026}))
+                elif t == "Buddy":
+                    out.append(RawScores(t, 76, 7.1, 4, 2.54, year=None,
+                                         source_years={"Metacritic": 2019, "OMDb": 2026}))
+                else:
+                    out.append(RawScores(t, 35, 6.6, 24, 2.94, year=2002,
+                                         source_years={"Metacritic": 2002, "OMDb": 2002}))
+            return out, []
+        return fetch_all
+
+    def test_matched_year_written_unknown_left_blank(self):
+        from update_scores import update_workbook
+        calls = []
+        with patch("update_scores.fetch_all", side_effect=self._fake_fetch_all(calls)):
+            update_workbook(self.input, self.output, api_key="k", delay=0.0)
+        self.assertEqual(self._output_years(), {"Buddy": None, "Resident Evil": 2002})
+
+    def test_manual_year_refetches_with_that_year(self):
+        from update_scores import update_workbook
+        calls = []
+        # Year prompt for Buddy only (Resident Evil's year is known); then EOF
+        # ends the score prompts.
+        with patch("update_scores.fetch_all", side_effect=self._fake_fetch_all(calls)), \
+             patch("builtins.input", side_effect=["2026", EOFError]), \
+             patch("builtins.print"):
+            update_workbook(self.input, self.output, api_key="k", delay=0.0, manual=True)
+
+        self.assertEqual(calls[1], (["Buddy"], {"Buddy": 2026}))
+        self.assertEqual(self._output_years(), {"Buddy": 2026, "Resident Evil": 2002})
+        ws = openpyxl.load_workbook(self.output).active
+        hm = get_header_map(ws)
+        self.assertEqual(ws.cell(2, hm["Reviews"]).value, 22)
 
 
 if __name__ == "__main__":

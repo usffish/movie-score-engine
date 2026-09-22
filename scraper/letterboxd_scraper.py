@@ -201,9 +201,10 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
                   asked for the correct slug as a last resort.
 
     Returns:
-        dict with keys: rating (float|None), rating_count (int|None), url (str|None)
+        dict with keys: rating (float|None), rating_count (int|None), url (str|None),
+        year (int|None, release year of the matched page)
     """
-    result = {"rating": None, "rating_count": None, "url": None}
+    result = {"rating": None, "rating_count": None, "url": None, "year": None}
 
     for slug in _candidate_slugs(title, year):
         url = _FILM_URL.format(slug=slug)
@@ -218,6 +219,7 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
             result["url"] = url
             result["rating"] = _parse_rating_from_soup(soup)
             result["rating_count"] = _parse_review_count_from_soup(soup)
+            result["year"] = _parse_year_from_soup(soup)
             return result
 
     logger.info("Letterboxd: direct slugs failed for '%s', trying search", title)
@@ -229,6 +231,7 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
             result["url"] = url
             result["rating"] = _parse_rating_from_soup(soup)
             result["rating_count"] = _parse_review_count_from_soup(soup)
+            result["year"] = _parse_year_from_soup(soup)
             return result
 
     if resolver is not None:
@@ -242,6 +245,7 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
                 result["url"] = url
                 result["rating"] = _parse_rating_from_soup(soup)
                 result["rating_count"] = _parse_review_count_from_soup(soup)
+                result["year"] = _parse_year_from_soup(soup)
                 return result
 
     logger.warning("Letterboxd: could not find '%s'", title)
@@ -266,4 +270,5 @@ def get_letterboxd_data_with_slug(slug: Optional[str], rate_limiter=None) -> dic
         "rating": _parse_rating_from_soup(soup),
         "rating_count": _parse_review_count_from_soup(soup),
         "url": url,
+        "year": _parse_year_from_soup(soup),
     }

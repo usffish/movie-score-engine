@@ -4,7 +4,7 @@ scoring.py
 Data models and scoring math: normalisation and composite calculation.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -15,6 +15,38 @@ class RawScores:
     imdb_rating: Optional[float]       # 0.0-10.0; None when N/A
     review_count: int                  # >= 0; 0 when Metacritic not found
     letterboxd_rating: Optional[float] # 0.0-5.0; None when not found
+    year: Optional[int] = None         # confirmed release year; None when unknown
+    source_years: dict = field(default_factory=dict)  # {"Metacritic": 2019, ...} as matched
+
+
+# Sources may disagree by a year (festival premiere vs. theatrical release).
+_YEAR_TOLERANCE = 1
+
+
+def resolve_year(given: Optional[int], source_years: dict) -> Optional[int]:
+    """
+    Decide the release year to record for a movie.
+
+    - A year the user supplied always wins.
+    - Otherwise, if every source that reported a year agrees (within ±1),
+      return OMDb's year when present, else the earliest reported.
+    - If the sources disagree, or none reported a year, return None — the
+      scores may come from different films, so the year is unknown.
+    """
+    if given is not None:
+        return given
+    found = {src: y for src, y in source_years.items() if y is not None}
+    if not found:
+        return None
+    if max(found.values()) - min(found.values()) > _YEAR_TOLERANCE:
+        return None
+    return found.get("OMDb", min(found.values()))
+
+
+def format_source_years(source_years: dict) -> str:
+    """Render {'Metacritic': 2019, 'OMDb': 2026} as 'Metacritic 2019 · OMDb 2026'."""
+    parts = [f"{src} {y if y is not None else '—'}" for src, y in source_years.items()]
+    return " · ".join(parts) if parts else "no source found it"
 
 
 @dataclass

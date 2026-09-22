@@ -8,6 +8,7 @@ OMDb API endpoint:
 """
 
 import logging
+import re
 from typing import Optional
 
 import requests
@@ -35,6 +36,7 @@ _FALLBACK = {
     "metascore": None,
     "imdb_rating": None,
     "imdb_id": None,
+    "year": None,
 }
 
 
@@ -68,6 +70,23 @@ def _parse_imdb_rating(value: Optional[str]) -> Optional[float]:
         return None
 
 
+def _parse_year(value: Optional[str]) -> Optional[int]:
+    """Parse OMDb's Year field ('2019', or '2019–2021' for series) to its first year."""
+    if not value:
+        return None
+    match = re.match(r"(\d{4})", str(value))
+    return int(match.group(1)) if match else None
+
+
+def _to_result(data: dict, imdb_id_fallback: Optional[str] = None) -> dict:
+    return {
+        "metascore": _parse_metascore(data.get("Metascore")),
+        "imdb_rating": _parse_imdb_rating(data.get("imdbRating")),
+        "imdb_id": data.get("imdbID") or imdb_id_fallback,
+        "year": _parse_year(data.get("Year")),
+    }
+
+
 def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver=None,
                   rate_limiter=None) -> dict:
     """
@@ -86,6 +105,7 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
             metascore  (int|None):    0–100; None when N/A or not found
             imdb_rating (float|None): 0.0–10.0; None when N/A or not found
             imdb_id     (str|None):   IMDb ID (e.g. "tt0118749"); None when not found
+            year        (int|None):   release year of the matched title
     """
     params: dict = {"t": title, "apikey": api_key}
     if year is not None:
@@ -110,19 +130,11 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
                 )
                 if id_data and id_data.get("Response") != "False":
                     logger.info("OMDb: Gemini resolved IMDb ID '%s' for '%s'", imdb_id, title)
-                    return {
-                        "metascore": _parse_metascore(id_data.get("Metascore")),
-                        "imdb_rating": _parse_imdb_rating(id_data.get("imdbRating")),
-                        "imdb_id": id_data.get("imdbID") or imdb_id,
-                    }
+                    return _to_result(id_data, imdb_id)
 
         return dict(_FALLBACK)
 
-    return {
-        "metascore": _parse_metascore(data.get("Metascore")),
-        "imdb_rating": _parse_imdb_rating(data.get("imdbRating")),
-        "imdb_id": data.get("imdbID") or None,
-    }
+    return _to_result(data)
 
 
 def get_omdb_data_with_id(api_key: str, imdb_id: Optional[str], rate_limiter=None) -> dict:
@@ -139,8 +151,4 @@ def get_omdb_data_with_id(api_key: str, imdb_id: Optional[str], rate_limiter=Non
     if data is None or data.get("Response") == "False":
         return dict(_FALLBACK)
 
-    return {
-        "metascore": _parse_metascore(data.get("Metascore")),
-        "imdb_rating": _parse_imdb_rating(data.get("imdbRating")),
-        "imdb_id": data.get("imdbID") or imdb_id,
-    }
+    return _to_result(data, imdb_id)

@@ -17,7 +17,7 @@ from scoring import NormalisedScores, RawScores
 logger = logging.getLogger(__name__)
 
 EXPECTED_HEADERS = [
-    "Movies", "Metacritic", "st.Metacritic", "Reviews",
+    "Movies", "Year", "Metacritic", "st.Metacritic", "Reviews",
     "Letterboxd", "st.Letterboxd", "IMDB", "st.IMDB", "TRUE",
     "LastUpdated", "StableWeeks",
 ]

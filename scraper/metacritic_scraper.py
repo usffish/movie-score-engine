@@ -160,6 +160,32 @@ def _extract_individual_scores(soup: BeautifulSoup) -> list:
     return scores
 
 
+def _extract_release_year(soup: BeautifulSoup) -> Optional[int]:
+    """Extract the release year from the page's JSON-LD datePublished (e.g. '2019-03-20')."""
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            if isinstance(data, list):
+                data = data[0]
+            published = data.get("datePublished") or data.get("dateCreated")
+            if published:
+                match = re.match(r"(\d{4})", str(published))
+                if match:
+                    return int(match.group(1))
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            continue
+    return None
+
+
+def _year_mismatch(soup: BeautifulSoup, year: Optional[int]) -> bool:
+    """True when a year was requested and the page is clearly for a different year."""
+    if not year:
+        return False
+    page_year = _extract_release_year(soup)
+    # Allow ±1 for festival-vs-release date differences between sources.
+    return page_year is not None and abs(page_year - year) > 1
+
+
 def _search_for_slug(title: str, rate_limiter=None) -> Optional[str]:
     """Search Metacritic and return the slug of the best matching movie."""
     query = re.sub(r"\s+", "%20", title.strip())
@@ -201,8 +227,10 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
 
     Args:
         title:    Movie title.
-        year:     Optional release year (unused in URL construction but kept for
-                  API compatibility).
+        year:     Optional release year.  Year-suffixed slugs (buddy-2026) are
+                  tried first, and pages whose release year differs by more
+                  than one are skipped — the plain slug belongs to whichever
+                  film claimed the title first (/movie/buddy/ is 2019's).
         resolver: Optional GeminiResolver instance.  When all local slug
                   candidates and the site search have failed, the resolver is
                   asked for the correct slug as a last resort.
@@ -211,25 +239,37 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
         dict with keys:
             review_count (int):         >= 0; 0 when not found or on error.
             metascore    (int | None):  0–100; None when unavailable.
+            year         (int | None):  release year of the matched page.
     """
-    result: dict = {"review_count": 0, "metascore": None}
+    result: dict = {"review_count": 0, "metascore": None, "year": None}
 
     slug_no_article = _slugify(title)
     slug_with_article = _slugify_with_article(title)
 
-    slugs = [slug_no_article]
+    base_slugs = [slug_no_article]
     if slug_with_article != slug_no_article:
-        slugs.append(slug_with_article)
+        base_slugs.append(slug_with_article)
+
+    slugs = [f"{s}-{year}" for s in base_slugs] if year else []
+    slugs += base_slugs
 
     soup = None
     matched_slug = None
 
     for slug in slugs:
         url = _MOVIE_URL.format(slug=slug)
-        soup = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
-        if soup is not None:
-            matched_slug = slug
-            break
+        candidate = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
+        if candidate is None:
+            continue
+        if _year_mismatch(candidate, year):
+            logger.info(
+                "Metacritic: %s is from %s, not %s — skipping",
+                url, _extract_release_year(candidate), year,
+            )
+            continue
+        soup = candidate
+        matched_slug = slug
+        break
 
     if soup is None:
         logger.info("Metacritic: direct slug failed for '%s', trying search", title)
@@ -237,6 +277,8 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
         if matched_slug:
             url = _MOVIE_URL.format(slug=matched_slug)
             soup = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
+            if soup is not None and _year_mismatch(soup, year):
+                soup = None
 
     if soup is None and resolver is not None:
         logger.info("Metacritic: site search failed for '%s', asking Gemini", title)
@@ -262,7 +304,7 @@ def _extract_scores_from_soup(soup, slug: str, rate_limiter=None, label: str = "
     Handles both the aggregate path (4+ reviews) and the individual-score
     averaging path (1–3 reviews).  *label* is used only for log messages.
     """
-    result: dict = {"review_count": 0, "metascore": None}
+    result: dict = {"review_count": 0, "metascore": None, "year": _extract_release_year(soup)}
 
     count = _extract_review_count(soup)
     if count is not None:
@@ -307,13 +349,13 @@ def get_metacritic_data_with_slug(slug: Optional[str], rate_limiter=None) -> dic
     Returns dict with review_count and metascore.
     """
     if not slug:
-        return {"review_count": 0, "metascore": None}
+        return {"review_count": 0, "metascore": None, "year": None}
 
     url = _MOVIE_URL.format(slug=slug)
     soup = _fetch(url, rate_limiter=rate_limiter)
 
     if soup is None:
-        return {"review_count": 0, "metascore": None}
+        return {"review_count": 0, "metascore": None, "year": None}
 
     return _extract_scores_from_soup(soup, slug, rate_limiter)
 

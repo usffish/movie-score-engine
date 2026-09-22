@@ -32,7 +32,8 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Review-count-weighted composite** — Metacritic's contribution to the composite scales with its critic review count. A score backed by 80 reviews carries more weight than the same score backed by 4.
 - **Dynamic denominator** — missing scores are dropped from both numerator and denominator rather than substituted with zeros, preserving the relative weighting of whichever sources are available.
 - **Resilient scraping** — all HTTP fetches retry up to 3 times with exponential back-off behind a thread-safe per-domain rate limiter. Per-movie failures are logged and skipped; the rest of the batch continues.
-- **Year disambiguation** — an optional `Year` column steers OMDb and Letterboxd to the right film when several share a title (e.g. *Parasite* 2019 vs. 1982).
+- **Cloudflare-safe Metacritic requests** — Metacritic sits behind Cloudflare, which fingerprints the TLS handshake and serves older Python/OpenSSL builds a 403 "Just a moment…" challenge even with browser headers. Metacritic requests go through [`curl_cffi`](https://github.com/lexiforest/curl_cffi) impersonating Chrome, so it works regardless of the local Python build.
+- **Year disambiguation** — an optional `Year` column steers all three sources to the right film when several share a title (e.g. *Parasite* 2019 vs. 1982). Left blank, it's filled with the year the sources matched, or left blank when they disagree; `--manual` asks for it.
 - **Data safety** — existing cell values are never overwritten by a missing result. The input workbook is never modified.
 - **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
 - **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks.
@@ -46,16 +47,16 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 ```
 .
 ├── update_scores.py          # Thin orchestrator: fetch_all, update_workbook, CLI
-├── scoring.py                # Data models (RawScores, NormalisedScores) + scoring math
-├── excel.py                  # Workbook I/O, header management, stability tracking
-├── manual.py                 # Interactive prompts for missing score entry
+├── scoring.py                # Data models (RawScores, NormalisedScores), scoring math, year resolution
+├── excel.py                  # Workbook I/O, header management, Year column, stability tracking
+├── manual.py                 # Interactive prompts for unknown years and missing scores
 ├── requirements.txt
 ├── Movies.xlsx               # Input watchlist (user-provided, not committed)
 ├── Movies_updated.xlsx       # Generated output (not committed)
 ├── scraper/
 │   ├── http.py               # Shared HTTP retry util, RateLimiter, slugify()
-│   ├── omdb_client.py        # OMDb API client — Metascore + IMDB rating
-│   ├── metacritic_scraper.py # Scrapes critic review count (+ Metascore fallback)
+│   ├── omdb_client.py        # OMDb API client — Metascore + IMDB rating + release year
+│   ├── metacritic_scraper.py # Scrapes critic review count + Metascore (curl_cffi, Cloudflare-safe)
 │   ├── letterboxd_scraper.py # Scrapes average community rating
 │   └── gemini_resolver.py    # AI-powered slug resolution (optional)
 └── tests/
@@ -68,7 +69,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
     ├── test_composite_properties.py      # Property: formula correctness + safety
     ├── test_scraper_properties.py        # Property: review count, rating range, back-off
     ├── test_orchestrator_properties.py   # Property: input unchanged, output columns
-    └── test_year_disambiguation.py       # Year column parsing + Letterboxd year matching
+    └── test_year_disambiguation.py       # Year matching, auto-fill, and manual year prompts
 ```
 
 ---
@@ -235,7 +236,7 @@ python update_scores.py --gemini-key $GEMINI_API_KEY
 | --delay SECS | 1.0 | Seconds between requests to each source |
 | --verbose | off | Enable debug-level logging |
 | --smart-update | off | Skip recently-stable movies |
-| --manual | off | Prompt for missing values interactively (Ctrl-C saves and stops) |
+| --manual | off | Prompt for unknown release years, then missing values, interactively (Ctrl-C saves and stops) |
 | --gemini-key KEY | — | Gemini API key for AI slug resolution (overrides GEMINI_API_KEY env var) |
 | --random | off | Process movies in random order |
 
@@ -245,7 +246,9 @@ python update_scores.py --gemini-key $GEMINI_API_KEY
 
 Place your watchlist in Movies.xlsx in the project root. The workbook must have a column named **Movies** with one title per row. All other columns are optional — the script adds any missing output columns automatically.
 
-An optional **Year** column (release year) disambiguates films that share a title. When present, the year is sent to OMDb, and Letterboxd tries the year-suffixed slug first (e.g. `/film/parasite-2019/`) and skips any page whose release year doesn't match. Without it, `Parasite` resolves to the 1982 film on Letterboxd.
+An optional **Year** column (release year) disambiguates films that share a title. When present, the year is sent to OMDb, and Metacritic and Letterboxd try the year-suffixed slug first (e.g. `/movie/buddy-2026/`, `/film/parasite-2019/`) and skip any page whose release year doesn't match. Without it, `Parasite` resolves to the 1982 film on Letterboxd and `Buddy` to the 2019 film on Metacritic.
+
+Leave Year blank and the script fills it in for you (see **Output columns**) — check it to confirm the right film was found.
 
 ---
 
@@ -253,6 +256,7 @@ An optional **Year** column (release year) disambiguates films that share a titl
 
 | Column | Description |
 |--------|-------------|
+| Year | Release year of the film the scores came from. A year you entered is kept as-is. Otherwise it's filled when Metacritic, Letterboxd and OMDb agree (±1 year); left **blank** when they matched different films — the run log lists what each source found |
 | Metacritic | Metascore (0–100) — Metacritic scrape, falls back to OMDb |
 | st.Metacritic | Min-max normalised Metascore (0.0–1.0) |
 | Reviews | Critic review count from Metacritic |
@@ -268,7 +272,15 @@ An optional **Year** column (release year) disambiguates films that share a titl
 
 ## Manual entry
 
-`--manual` prompts for any score the scrapers could not fetch. Each prompt shows where you are in the queue:
+`--manual` first asks for the release year of any movie whose year is unknown (blank Year, and the sources matched different films), showing what each source found. The movie is re-fetched with the year you enter before any score prompts:
+
+```
+  Buddy [1/2 · 1 left]
+    found: Metacritic 2019 · Letterboxd 2019 · OMDb 2026
+    Release year: 2026
+```
+
+It then prompts for any score the scrapers could not fetch. Each prompt shows where you are in the queue:
 
 ```
   ── Manual entry for: Nirvana the Band the Show the Movie ── [3/12 · 9 left]
@@ -280,7 +292,7 @@ An optional **Year** column (release year) disambiguates films that share a titl
 
 The count covers movies with at least one missing field plus movies that failed entirely — fully-fetched movies are never prompted for.
 
-Press Enter to skip a field; the existing workbook value is left untouched. **Ctrl-C stops the prompting without losing work** — every entry already made is written to the output workbook, including the fields typed for the movie you were on when you interrupted. Movies not yet reached keep whatever the scrapers found, so the next run only asks about what's still missing.
+Press Enter to skip a field; the existing workbook value is left untouched. **Ctrl-C (or end of input) stops the prompting without losing work** — every entry already made is written to the output workbook, including the fields typed for the movie you were on when you interrupted. Movies not yet reached keep whatever the scrapers found, so the next run only asks about what's still missing.
 
 ---
 
