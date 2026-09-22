@@ -437,7 +437,8 @@ def parse_args(argv=None):
         "--manual", action="store_true", dest="manual",
         help=(
             "Prompt for manual entry when scores cannot be fetched automatically. "
-            "Existing values in the workbook are preserved when a field is skipped."
+            "Existing values in the workbook are preserved when a field is skipped. "
+            "Ctrl-C stops the prompting and saves everything entered so far."
         )
     )
     parser.add_argument(

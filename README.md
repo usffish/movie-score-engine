@@ -35,6 +35,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Data safety** — existing cell values are never overwritten by a missing result. The input workbook is never modified.
 - **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
 - **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks.
+- **Interrupt-safe manual entry** — `--manual` shows how many movies are left to fill in, and Ctrl-C stops the prompting without discarding anything: entries already made — including the half-filled movie you were on — are still written to the output workbook.
 - **AI-powered slug resolution** — optional Gemini API integration resolves hard-to-find movie slugs as a last resort when local heuristics and site search both fail, without ever asking the AI for scores. Activates per-scraper, so a single failed source triggers a targeted retry rather than a full re-fetch.
 
 ---
@@ -231,7 +232,7 @@ python update_scores.py --gemini-key $GEMINI_API_KEY
 | --delay SECS | 1.0 | Seconds between requests to each source |
 | --verbose | off | Enable debug-level logging |
 | --smart-update | off | Skip recently-stable movies |
-| --manual | off | Prompt for missing values interactively |
+| --manual | off | Prompt for missing values interactively (Ctrl-C saves and stops) |
 | --gemini-key KEY | — | Gemini API key for AI slug resolution (overrides GEMINI_API_KEY env var) |
 | --random | off | Process movies in random order |
 
@@ -257,6 +258,24 @@ Place your watchlist in Movies.xlsx in the project root. The workbook must have 
 | TRUE | Weighted composite score (0.0–1.0, rounded to 2 dp) |
 | LastUpdated | ISO date of last successful fetch (YYYY-MM-DD) |
 | StableWeeks | Consecutive weeks the composite stayed within ±0.05 |
+
+---
+
+## Manual entry
+
+`--manual` prompts for any score the scrapers could not fetch. Each prompt shows where you are in the queue:
+
+```
+  ── Manual entry for: Nirvana the Band the Show the Movie ── [3/12 · 9 left]
+  (Press Enter to skip a field and leave it unchanged, Ctrl-C to stop and save)
+
+  Metascore (0-100): 74
+  IMDB rating (0.0-10.0):
+```
+
+The count covers movies with at least one missing field plus movies that failed entirely — fully-fetched movies are never prompted for.
+
+Press Enter to skip a field; the existing workbook value is left untouched. **Ctrl-C stops the prompting without losing work** — every entry already made is written to the output workbook, including the fields typed for the movie you were on when you interrupted. Movies not yet reached keep whatever the scrapers found, so the next run only asks about what's still missing.
 
 ---
 

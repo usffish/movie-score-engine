@@ -12,6 +12,18 @@ from scoring import RawScores
 logger = logging.getLogger(__name__)
 
 
+class ManualEntryInterrupted(Exception):
+    """
+    Raised when the user Ctrl-Cs out of a manual entry prompt.
+
+    Carries the fields entered before the interrupt so they are not lost.
+    """
+
+    def __init__(self, partial: Optional[RawScores] = None):
+        super().__init__("Manual entry interrupted")
+        self.partial = partial
+
+
 def _prompt_value(prompt: str, parser, label: str):
     """
     Prompt the user for a value, parse it with *parser*, and return the result.
@@ -49,46 +61,67 @@ def _prompt_float_in_range(prompt: str, lo: float, hi: float, label: str) -> Opt
     return _prompt_value(prompt, parse, label)
 
 
-def prompt_missing_scores(raw: RawScores) -> RawScores:
+def _progress_label(position: Optional[int], total: Optional[int]) -> str:
+    """Render a ' [3/12 · 9 left]' suffix, or '' when progress is unknown."""
+    if position is None or total is None:
+        return ""
+    return f" [{position}/{total} · {total - position} left]"
+
+
+def prompt_missing_scores(
+    raw: RawScores,
+    position: Optional[int] = None,
+    total: Optional[int] = None,
+) -> RawScores:
     """
     Interactively prompt the user to fill in any None/zero fields on *raw*.
 
     Returns a new RawScores with user-supplied values merged in.
     """
-    print(f"\n  ── Manual entry for: {raw.title} ──")
-    print("  (Press Enter to skip a field and leave it unchanged)\n")
+    print(f"\n  ── Manual entry for: {raw.title} ──{_progress_label(position, total)}")
+    print("  (Press Enter to skip a field and leave it unchanged, Ctrl-C to stop and save)\n")
 
     metascore = raw.metascore
     imdb_rating = raw.imdb_rating
     review_count = raw.review_count
     letterboxd_rating = raw.letterboxd_rating
 
-    if metascore is None:
-        metascore = _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore")
-
-    if imdb_rating is None:
-        imdb_rating = _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating")
-
-    if review_count == 0:
-        rc = _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count")
-        if rc is not None:
-            review_count = rc
-
-    if letterboxd_rating is None:
-        letterboxd_rating = _prompt_float_in_range(
-            "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
+    def snapshot() -> RawScores:
+        return RawScores(
+            title=raw.title,
+            metascore=metascore,
+            imdb_rating=imdb_rating,
+            review_count=review_count,
+            letterboxd_rating=letterboxd_rating,
         )
 
-    return RawScores(
-        title=raw.title,
-        metascore=metascore,
-        imdb_rating=imdb_rating,
-        review_count=review_count,
-        letterboxd_rating=letterboxd_rating,
-    )
+    try:
+        if metascore is None:
+            metascore = _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore")
+
+        if imdb_rating is None:
+            imdb_rating = _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating")
+
+        if review_count == 0:
+            rc = _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count")
+            if rc is not None:
+                review_count = rc
+
+        if letterboxd_rating is None:
+            letterboxd_rating = _prompt_float_in_range(
+                "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
+            )
+    except KeyboardInterrupt:
+        raise ManualEntryInterrupted(snapshot()) from None
+
+    return snapshot()
 
 
-def prompt_failed_movie(title: str) -> Optional[RawScores]:
+def prompt_failed_movie(
+    title: str,
+    position: Optional[int] = None,
+    total: Optional[int] = None,
+) -> Optional[RawScores]:
     """
     Interactively prompt the user to enter all scores for a movie that
     failed entirely during fetch.
@@ -96,28 +129,40 @@ def prompt_failed_movie(title: str) -> Optional[RawScores]:
     Returns a RawScores if the user provides at least one value, or None
     if the user skips all fields.
     """
-    print(f"\n  ── Manual entry for failed movie: {title} ──")
-    print("  (Press Enter to skip a field)\n")
+    print(f"\n  ── Manual entry for failed movie: {title} ──{_progress_label(position, total)}")
+    print("  (Press Enter to skip a field, Ctrl-C to stop and save)\n")
 
-    metascore = _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore")
-    imdb_rating = _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating")
-    rc = _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count")
-    review_count = rc if rc is not None else 0
-    letterboxd_rating = _prompt_float_in_range(
-        "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
-    )
+    metascore = None
+    imdb_rating = None
+    review_count = 0
+    letterboxd_rating = None
 
-    if all(v is None for v in (metascore, imdb_rating, letterboxd_rating)) and review_count == 0:
+    def snapshot() -> Optional[RawScores]:
+        if all(v is None for v in (metascore, imdb_rating, letterboxd_rating)) and review_count == 0:
+            return None
+        return RawScores(
+            title=title,
+            metascore=metascore,
+            imdb_rating=imdb_rating,
+            review_count=review_count,
+            letterboxd_rating=letterboxd_rating,
+        )
+
+    try:
+        metascore = _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore")
+        imdb_rating = _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating")
+        rc = _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count")
+        review_count = rc if rc is not None else 0
+        letterboxd_rating = _prompt_float_in_range(
+            "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
+        )
+    except KeyboardInterrupt:
+        raise ManualEntryInterrupted(snapshot()) from None
+
+    result = snapshot()
+    if result is None:
         logger.info("Skipped manual entry for '%s'", title)
-        return None
-
-    return RawScores(
-        title=title,
-        metascore=metascore,
-        imdb_rating=imdb_rating,
-        review_count=review_count,
-        letterboxd_rating=letterboxd_rating,
-    )
+    return result
 
 
 def _manual_matches_existing(new: RawScores, prev: RawScores) -> bool:
@@ -154,6 +199,9 @@ def apply_manual_entry(
     """
     After Pass 1, optionally prompt the user for missing values.
 
+    Ctrl-C stops the prompting but keeps every entry made so far, so the
+    caller can still write them out.
+
     Returns:
         (raw_scores, failed, manual_unchanged)
         where manual_unchanged is a set of titles whose manual entries were
@@ -166,31 +214,64 @@ def apply_manual_entry(
 
     existing = existing or {}
 
-    updated_raw = []
-    for raw in raw_scores:
-        has_missing = (
+    def _has_missing(raw: RawScores) -> bool:
+        return (
             raw.metascore is None
             or raw.imdb_rating is None
             or raw.review_count == 0
             or raw.letterboxd_rating is None
         )
-        if has_missing:
-            filled = prompt_missing_scores(raw)
-            prev = existing.get(raw.title)
-            if prev is not None and _manual_matches_existing(filled, prev):
-                manual_unchanged.add(raw.title)
-            raw = filled
+
+    total = sum(1 for raw in raw_scores if _has_missing(raw)) + len(failed)
+    position = 0
+    entered = 0
+    interrupted = False
+
+    updated_raw = []
+    for raw in raw_scores:
+        if _has_missing(raw) and not interrupted:
+            position += 1
+            try:
+                filled = prompt_missing_scores(raw, position, total)
+            except ManualEntryInterrupted as exc:
+                interrupted = True
+                filled = exc.partial
+            if filled is not None:
+                prev = existing.get(raw.title)
+                if prev is not None and _manual_matches_existing(filled, prev):
+                    manual_unchanged.add(raw.title)
+                if filled != raw:
+                    entered += 1
+                raw = filled
         updated_raw.append(raw)
 
     still_failed = []
     for title in failed:
-        result = prompt_failed_movie(title)
+        if interrupted:
+            still_failed.append(title)
+            continue
+        position += 1
+        try:
+            result = prompt_failed_movie(title, position, total)
+        except ManualEntryInterrupted as exc:
+            interrupted = True
+            result = exc.partial
         if result is not None:
             prev = existing.get(title)
             if prev is not None and _manual_matches_existing(result, prev):
                 manual_unchanged.add(title)
             updated_raw.append(result)
+            entered += 1
         else:
             still_failed.append(title)
+
+    if interrupted:
+        plural = "entry" if entered == 1 else "entries"
+        print(f"\n  Manual entry stopped at {position} of {total} — "
+              f"keeping the {entered} {plural} already made.\n")
+        logger.warning(
+            "Manual entry interrupted at %d of %d movie(s); %d %s kept",
+            position, total, entered, plural,
+        )
 
     return updated_raw, still_failed, manual_unchanged
