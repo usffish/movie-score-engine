@@ -32,6 +32,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Review-count-weighted composite** — Metacritic's contribution to the composite scales with its critic review count. A score backed by 80 reviews carries more weight than the same score backed by 4.
 - **Dynamic denominator** — missing scores are dropped from both numerator and denominator rather than substituted with zeros, preserving the relative weighting of whichever sources are available.
 - **Resilient scraping** — all HTTP fetches retry up to 3 times with exponential back-off behind a thread-safe per-domain rate limiter. Per-movie failures are logged and skipped; the rest of the batch continues.
+- **Year disambiguation** — an optional `Year` column steers OMDb and Letterboxd to the right film when several share a title (e.g. *Parasite* 2019 vs. 1982).
 - **Data safety** — existing cell values are never overwritten by a missing result. The input workbook is never modified.
 - **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
 - **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks.
@@ -66,7 +67,8 @@ For every title in a personal Movies.xlsx watchlist, the tool:
     ├── test_omdb_properties.py           # Property: OMDb parsing round-trip
     ├── test_composite_properties.py      # Property: formula correctness + safety
     ├── test_scraper_properties.py        # Property: review count, rating range, back-off
-    └── test_orchestrator_properties.py   # Property: input unchanged, output columns
+    ├── test_orchestrator_properties.py   # Property: input unchanged, output columns
+    └── test_year_disambiguation.py       # Year column parsing + Letterboxd year matching
 ```
 
 ---
@@ -156,12 +158,13 @@ Missing scores are dropped from both numerator and denominator, not substituted 
 
 ## Setup
 
-**Requirements:** Python 3.10+, a free [OMDb API key](https://www.omdbapi.com/apikey.aspx)
+**Requirements:** Python 3.9+, a free [OMDb API key](https://www.omdbapi.com/apikey.aspx)
 
 ```bash
 # Create and activate a virtual environment
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # macOS / Linux
+# .venv\Scripts\Activate.ps1     # Windows PowerShell
 
 # Install dependencies
 pip install -r requirements.txt
@@ -241,6 +244,8 @@ python update_scores.py --gemini-key $GEMINI_API_KEY
 ## Input format
 
 Place your watchlist in Movies.xlsx in the project root. The workbook must have a column named **Movies** with one title per row. All other columns are optional — the script adds any missing output columns automatically.
+
+An optional **Year** column (release year) disambiguates films that share a title. When present, the year is sent to OMDb, and Letterboxd tries the year-suffixed slug first (e.g. `/film/parasite-2019/`) and skips any page whose release year doesn't match. Without it, `Parasite` resolves to the 1982 film on Letterboxd.
 
 ---
 

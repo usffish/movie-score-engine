@@ -112,6 +112,25 @@ def _parse_review_count_from_soup(soup: BeautifulSoup) -> Optional[int]:
     return None
 
 
+def _parse_year_from_soup(soup: BeautifulSoup) -> Optional[int]:
+    """Extract the release year from a Letterboxd film page's og:title, e.g. 'Parasite (1982)'."""
+    meta = soup.find("meta", property="og:title")
+    if meta and meta.get("content"):
+        match = re.search(r"\((\d{4})\)\s*$", meta["content"])
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _year_mismatch(soup: BeautifulSoup, year: Optional[int]) -> bool:
+    """True when a year was requested and the page is clearly for a different year."""
+    if not year:
+        return False
+    page_year = _parse_year_from_soup(soup)
+    # Allow ±1 for festival-vs-release date differences between sources.
+    return page_year is not None and abs(page_year - year) > 1
+
+
 def _search_for_slug(title: str, rate_limiter=None) -> Optional[str]:
     """Search Letterboxd and return the slug of the best matching film."""
     query = re.sub(r"\s+", "+", title.strip())
@@ -150,15 +169,20 @@ def _candidate_slugs(title: str, year: Optional[int] = None) -> list:
     Return an ordered list of slug candidates to try for a given title.
 
     Letterboxd commonly uses:
+      - slug with year:        the-dark-knight-2008  (tried first when year is known)
       - plain slug:            the-dark-knight
-      - slug with year:        the-dark-knight-2008
       - slug with suffix -1:   the-dark-knight-1
       - slug with suffix -2:   the-dark-knight-2
+
+    The year-suffixed slug goes first because the plain slug belongs to
+    whichever film claimed the title first (e.g. /film/parasite/ is the 1982
+    film; the 2019 one is /film/parasite-2019/).
     """
     base = _slugify(title)
-    candidates = [base]
+    candidates = []
     if year:
         candidates.append(f"{base}-{year}")
+    candidates.append(base)
     candidates.append(f"{base}-1")
     candidates.append(f"{base}-2")
     return candidates
@@ -185,6 +209,12 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
         url = _FILM_URL.format(slug=slug)
         soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
         if soup is not None:
+            if _year_mismatch(soup, year):
+                logger.info(
+                    "Letterboxd: %s is from %s, not %s — skipping",
+                    url, _parse_year_from_soup(soup), year,
+                )
+                continue
             result["url"] = url
             result["rating"] = _parse_rating_from_soup(soup)
             result["rating_count"] = _parse_review_count_from_soup(soup)
@@ -195,7 +225,7 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
     if slug is not None:
         url = _FILM_URL.format(slug=slug)
         soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
-        if soup is not None:
+        if soup is not None and not _year_mismatch(soup, year):
             result["url"] = url
             result["rating"] = _parse_rating_from_soup(soup)
             result["rating_count"] = _parse_review_count_from_soup(soup)

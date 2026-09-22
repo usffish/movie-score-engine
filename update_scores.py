@@ -54,6 +54,7 @@ from excel import (
     migrate_stability_columns,
     read_existing_scores,
     read_prev_composite,
+    read_years,
     should_update,
     update_stability,
 )
@@ -94,6 +95,7 @@ def fetch_all(
     verbose: bool = False,
     resolver=None,
     rate_limiter=None,
+    years: Optional[dict] = None,
 ) -> tuple[list[RawScores], list[str]]:
     """
     Two-pass fetch: first run all scrapers, then retry failed ones with Gemini-resolved slugs.
@@ -102,24 +104,29 @@ def fetch_all(
     Pass 2: For movies that failed, use Gemini to resolve slugs, then retry only the
             failed scrapers.  This ensures Gemini only runs once per failed movie.
 
+    years maps title -> release year (from the optional Year column); a known
+    year disambiguates films that share a title.
+
     Returns:
         (raw_scores: list[RawScores], failed: list[str])
         where failed contains titles of movies that still failed after retry.
     """
+    years = years or {}
     raw_scores = []
     failed = []
     failed_for_retry = []
 
     for title in tqdm(movies, desc="Fetching scores (pass 1)", unit="movie"):
-        logger.info("Fetching: %s", title)
+        year = years.get(title)
+        logger.info("Fetching: %s%s", title, f" ({year})" if year else "")
         try:
-            omdb = get_omdb_data(title, api_key, resolver=None, rate_limiter=rate_limiter)
+            omdb = get_omdb_data(title, api_key, year=year, resolver=None, rate_limiter=rate_limiter)
             time.sleep(delay)
 
-            mc = get_metacritic_data(title, resolver=None, rate_limiter=rate_limiter)
+            mc = get_metacritic_data(title, year=year, resolver=None, rate_limiter=rate_limiter)
             time.sleep(delay)
 
-            lb = get_letterboxd_data(title, resolver=None, rate_limiter=rate_limiter)
+            lb = get_letterboxd_data(title, year=year, resolver=None, rate_limiter=rate_limiter)
             time.sleep(delay)
 
             scraped_metascore = mc.get("metascore")
@@ -271,6 +278,8 @@ def update_workbook(
             continue
         movie_rows.append((title_cell.row, str(title).strip()))
 
+    years = read_years(ws, header_map, movie_rows)
+
     if target_movie:
         movie_rows = [(r, t) for r, t in movie_rows if t == target_movie]
         if not movie_rows:
@@ -317,7 +326,7 @@ def update_workbook(
 
     raw_scores, failed = fetch_all(
         movies, api_key=api_key, delay=delay, verbose=verbose,
-        resolver=resolver, rate_limiter=rate_limiter,
+        resolver=resolver, rate_limiter=rate_limiter, years=years,
     )
 
     raw_scores, failed, manual_unchanged = apply_manual_entry(

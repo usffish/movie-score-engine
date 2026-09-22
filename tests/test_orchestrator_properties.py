@@ -365,7 +365,7 @@ def test_property13_blank_rows_excluded_from_processing(valid_titles, blank_valu
         captured_movies = []
 
         def capture_fetch_all(movies, api_key, delay=0.0, verbose=False,
-                              resolver=None, rate_limiter=None):
+                              resolver=None, rate_limiter=None, years=None):
             captured_movies.extend(movies)
             return [], []
 

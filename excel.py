@@ -207,6 +207,32 @@ def read_existing_scores(ws, ws_row: int, header_map: dict) -> RawScores:
     )
 
 
+def read_years(ws, header_map: dict, movie_rows: list) -> dict:
+    """
+    Return {title: year} from the optional Year column.
+
+    Rows with a blank or unparseable year are left out.  If the workbook has
+    no Year column, returns an empty dict.
+    """
+    year_col = header_map.get("Year")
+    if year_col is None:
+        return {}
+
+    years = {}
+    for ws_row, title in movie_rows:
+        raw = ws.cell(row=ws_row, column=year_col).value
+        if isinstance(raw, (datetime, date)):
+            years[title] = raw.year
+            continue
+        try:
+            year = int(float(str(raw).strip()))
+        except (ValueError, TypeError):
+            continue
+        if 1870 <= year <= 2100:
+            years[title] = year
+    return years
+
+
 def _has_missing_scores(ws, ws_row: int, header_map: dict) -> bool:
     """
     Return True if any core score column is blank AND the row has never been
