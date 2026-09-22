@@ -14,7 +14,20 @@ from typing import Optional
 
 import requests
 
+try:
+    from curl_cffi.requests.exceptions import RequestException as _CurlRequestException
+except ImportError:  # pragma: no cover - optional dependency
+    _CurlRequestException = None
+
 logger = logging.getLogger(__name__)
+
+# Network errors retry_get treats as retryable.  curl_cffi's exceptions don't
+# subclass requests', so both are listed when curl_cffi is installed.
+_NETWORK_ERRORS = (
+    (requests.RequestException, _CurlRequestException)
+    if _CurlRequestException is not None
+    else (requests.RequestException,)
+)
 
 
 def slugify(text: str) -> str:
@@ -120,7 +133,7 @@ def retry_get(
                 pfx, resp.status_code, url, attempt + 1, retries,
             )
 
-        except requests.RequestException as exc:
+        except _NETWORK_ERRORS as exc:
             logger.warning(
                 "%sRequest error (%s) for %s (attempt %d/%d)",
                 pfx, exc, url, attempt + 1, retries,

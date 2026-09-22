@@ -35,7 +35,19 @@ HEADERS = {
     "Referer": "https://www.metacritic.com/",
 }
 
-SESSION = requests.Session()
+try:
+    from curl_cffi import requests as _curl_requests
+except ImportError:  # pragma: no cover - optional dependency
+    _curl_requests = None
+
+# Metacritic sits behind Cloudflare, which fingerprints the TLS handshake.
+# Older Python/OpenSSL builds (e.g. Python 3.9 + OpenSSL 1.1.1) get a 403
+# "Just a moment..." challenge even with browser headers, so use curl_cffi's
+# Chrome-impersonating session when available.
+if _curl_requests is not None:
+    SESSION = _curl_requests.Session(impersonate="chrome")
+else:
+    SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
 _MOVIE_URL = "https://www.metacritic.com/movie/{slug}/"

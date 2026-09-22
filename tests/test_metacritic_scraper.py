@@ -234,6 +234,18 @@ class TestGetReviewCount(unittest.TestCase):
         self.assertEqual(mock_get.call_count, 6)
         self.assertEqual(result, 0)
 
+    def test_curl_cffi_network_error_is_retried(self):
+        """curl_cffi errors (which don't subclass requests') are retried, not raised."""
+        from curl_cffi.requests.exceptions import ConnectionError as CurlConnectionError
+
+        with patch("scraper.metacritic_scraper.SESSION.get") as mock_get:
+            mock_get.side_effect = CurlConnectionError("connection refused")
+            with patch("scraper.http.time.sleep"):
+                result = get_review_count("Some Movie")
+
+        self.assertEqual(mock_get.call_count, 6)
+        self.assertEqual(result, 0)
+
     def test_retry_exactly_3_times_per_url_with_article_title(self):
         """With an article title, retries 3 times for each of the two slug variants."""
         with patch("scraper.metacritic_scraper.SESSION.get") as mock_get:
