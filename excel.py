@@ -19,8 +19,21 @@ logger = logging.getLogger(__name__)
 EXPECTED_HEADERS = [
     "Movies", "Year", "Metacritic", "st.Metacritic", "Reviews",
     "Letterboxd", "st.Letterboxd", "IMDB", "st.IMDB", "TRUE",
-    "LastUpdated", "StableWeeks",
+    "LastUpdated", "StableWeeks", "Manual",
 ]
+
+# Column listing which scores in a row were typed in with --manual rather than
+# scraped, e.g. "IMDB, Letterboxd".  A scraped value replaces a typed one and
+# clears it from this list; smart-update always re-checks rows listed here.
+MANUAL_COLUMN = "Manual"
+
+# Raw-score field behind each column a manual entry can fill.
+MANUAL_FIELDS = {
+    "Metacritic": "metascore",
+    "Reviews": "review_count",
+    "Letterboxd": "letterboxd_rating",
+    "IMDB": "imdb_rating",
+}
 
 _TABLE_NAME = "Table1"
 _TABLE_CORE_COLS = [
@@ -136,9 +149,14 @@ def migrate_stability_columns(ws, header_map: dict) -> dict:
 
 def extend_table_to_stability_cols(ws) -> None:
     """
-    Ensure Table1's ref covers LastUpdated and StableWeeks.
+    Grow Table1 to cover every column the script manages (up to the last of
+    EXPECTED_HEADERS present, e.g. an appended Year or Manual column) and every
+    row, so sorting the table in Excel keeps each row's values together.
+
+    Excel requires one tableColumn per column in the ref, named after its
+    header cell, and the autoFilter range to match the table's.
     """
-    from openpyxl.utils import get_column_letter
+    from openpyxl.utils import get_column_letter, range_boundaries
     from openpyxl.worksheet.table import TableColumn
 
     table = ws.tables.get(_TABLE_NAME)
@@ -146,26 +164,50 @@ def extend_table_to_stability_cols(ws) -> None:
         return
 
     header_map = get_header_map(ws)
-    sw_col = header_map.get("StableWeeks")
-    if sw_col is None:
+    managed = [header_map[h] for h in EXPECTED_HEADERS if h in header_map]
+    if not managed:
         return
 
-    max_row = ws.max_row
-    new_ref = f"A1:{get_column_letter(sw_col)}{max_row}"
+    min_col, min_row, max_col, _ = range_boundaries(table.ref)
+    last_col = max(max_col, max(managed))
+    new_ref = f"{get_column_letter(min_col)}{min_row}:{get_column_letter(last_col)}{ws.max_row}"
 
     if table.ref == new_ref:
         return
 
-    table.ref = new_ref
+    next_id = max((c.id for c in table.tableColumns), default=0) + 1
+    for col in range(max_col + 1, last_col + 1):
+        header = ws.cell(row=min_row, column=col).value
+        name = str(header) if header not in (None, "") else f"Column{col}"
+        table.tableColumns.append(TableColumn(id=next_id, name=name))
+        next_id += 1
 
-    existing_names = {c.name for c in table.tableColumns}
-    for col_name in _TABLE_CORE_COLS:
-        if col_name not in existing_names:
-            col_idx = header_map.get(col_name)
-            if col_idx is not None:
-                table.tableColumns.append(TableColumn(id=col_idx, name=col_name))
+    table.ref = new_ref
+    if table.autoFilter is not None:
+        table.autoFilter.ref = new_ref
 
     logger.debug("Updated %s ref to %s", _TABLE_NAME, new_ref)
+
+
+def read_manual_fields(ws, ws_row: int, header_map: dict) -> set:
+    """Return the set of column names listed in the row's Manual cell."""
+    col = header_map.get(MANUAL_COLUMN)
+    if col is None:
+        return set()
+    raw = ws.cell(row=ws_row, column=col).value
+    if not raw:
+        return set()
+    return {part.strip() for part in str(raw).split(",") if part.strip() in MANUAL_FIELDS}
+
+
+def write_manual_fields(ws, ws_row: int, header_map: dict, fields: set) -> None:
+    """Write *fields* to the row's Manual cell in column order; blank when empty."""
+    col = header_map.get(MANUAL_COLUMN)
+    if col is None:
+        return
+    ordered = [name for name in MANUAL_FIELDS if name in fields]
+    # Assign directly: ws.cell(..., value=None) leaves the old value in place.
+    ws.cell(row=ws_row, column=col).value = ", ".join(ordered) if ordered else None
 
 
 def read_existing_scores(ws, ws_row: int, header_map: dict) -> RawScores:
@@ -235,12 +277,15 @@ def read_years(ws, header_map: dict, movie_rows: list) -> dict:
 
 def _has_missing_scores(ws, ws_row: int, header_map: dict) -> bool:
     """
-    Return True if any core score column is blank AND the row has never been
-    successfully processed (no LastUpdated date).
+    Return True if any core score column is blank, or any score in the row
+    was typed in by hand (listed in the Manual column).
+
+    Either way a source hasn't supplied that score yet, and it may add the
+    film later — so the row is re-checked on every smart-update run instead
+    of being skipped as "stable".
     """
-    lu_col = header_map.get("LastUpdated")
-    if lu_col and ws.cell(row=ws_row, column=lu_col).value is not None:
-        return False
+    if read_manual_fields(ws, ws_row, header_map):
+        return True
 
     core_cols = ["Metacritic", "Letterboxd", "IMDB", "TRUE"]
     for col_name in core_cols:
@@ -286,7 +331,7 @@ def should_update(ws, ws_row: int, header_map: dict, today: date) -> bool:
     Return True if this movie should be fetched in a smart-update run.
 
     Rules:
-      1. Any missing core score → always update.
+      1. Any missing core score, or any hand-typed score → always update.
       2. Never been updated (no LastUpdated) → always update.
       3. StableWeeks == 0 → always update.
       4. Otherwise: update only if days since last update >= StableWeeks * 7.

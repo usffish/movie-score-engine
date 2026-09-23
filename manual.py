@@ -81,7 +81,12 @@ def prompt_missing_scores(
     total: Optional[int] = None,
 ) -> RawScores:
     """
-    Interactively prompt the user to fill in any None/zero fields on *raw*.
+    Interactively prompt the user to fill in the blank fields on *raw*.
+
+    *raw* should already carry the workbook's existing values for anything the
+    scrapers didn't return, so fields filled on an earlier run aren't asked
+    again.  The critic review count is only asked for alongside a Metascore
+    typed in now — without a Metacritic page there's no count to know.
 
     Returns a new RawScores with user-supplied values merged in.
     """
@@ -92,6 +97,7 @@ def prompt_missing_scores(
     imdb_rating = raw.imdb_rating
     review_count = raw.review_count
     letterboxd_rating = raw.letterboxd_rating
+    metascore_entered = False
 
     def snapshot() -> RawScores:
         return dataclasses.replace(
@@ -105,11 +111,12 @@ def prompt_missing_scores(
     try:
         if metascore is None:
             metascore = _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore")
+            metascore_entered = metascore is not None
 
         if imdb_rating is None:
             imdb_rating = _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating")
 
-        if review_count == 0:
+        if review_count == 0 and metascore_entered:
             rc = _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count")
             if rc is not None:
                 review_count = rc
@@ -124,30 +131,45 @@ def prompt_missing_scores(
     return snapshot()
 
 
+def has_blank_scores(raw: Optional[RawScores]) -> bool:
+    """True when a score the user could type in is still blank (Reviews alone doesn't count)."""
+    return raw is None or (
+        raw.metascore is None or raw.imdb_rating is None or raw.letterboxd_rating is None
+    )
+
+
 def prompt_failed_movie(
     title: str,
     position: Optional[int] = None,
     total: Optional[int] = None,
+    existing: Optional[RawScores] = None,
 ) -> Optional[RawScores]:
     """
-    Interactively prompt the user to enter all scores for a movie that
-    failed entirely during fetch.
+    Interactively prompt the user for the scores of a movie that failed
+    entirely during fetch.
 
-    Returns a RawScores if the user provides at least one value, or None
-    if the user skips all fields.
+    Fields already filled in *existing* (the workbook row) aren't asked again,
+    and the critic review count is only asked for alongside a Metascore typed
+    in now.
+
+    Returns a RawScores (existing values plus new entries) if the user enters
+    at least one value, or None if nothing new was entered.
     """
     print(f"\n  ── Manual entry for failed movie: {title} ──{_progress_label(position, total)}")
     print("  (Press Enter to skip a field, Ctrl-C to stop and save)\n")
 
-    metascore = None
-    imdb_rating = None
-    review_count = 0
-    letterboxd_rating = None
+    start = existing or RawScores(title, None, None, 0, None)
+    metascore = start.metascore
+    imdb_rating = start.imdb_rating
+    review_count = start.review_count
+    letterboxd_rating = start.letterboxd_rating
 
     def snapshot() -> Optional[RawScores]:
-        if all(v is None for v in (metascore, imdb_rating, letterboxd_rating)) and review_count == 0:
+        current = (metascore, imdb_rating, review_count, letterboxd_rating)
+        if current == (start.metascore, start.imdb_rating, start.review_count, start.letterboxd_rating):
             return None
-        return RawScores(
+        return dataclasses.replace(
+            start,
             title=title,
             metascore=metascore,
             imdb_rating=imdb_rating,
@@ -156,13 +178,19 @@ def prompt_failed_movie(
         )
 
     try:
-        metascore = _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore")
-        imdb_rating = _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating")
-        rc = _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count")
-        review_count = rc if rc is not None else 0
-        letterboxd_rating = _prompt_float_in_range(
-            "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
-        )
+        metascore_entered = False
+        if metascore is None:
+            metascore = _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore")
+            metascore_entered = metascore is not None
+        if imdb_rating is None:
+            imdb_rating = _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating")
+        if review_count == 0 and metascore_entered:
+            rc = _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count")
+            review_count = rc if rc is not None else 0
+        if letterboxd_rating is None:
+            letterboxd_rating = _prompt_float_in_range(
+                "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
+            )
     except KeyboardInterrupt:
         raise ManualEntryInterrupted(snapshot()) from None
 
@@ -256,22 +284,18 @@ def apply_manual_entry(
 
     existing = existing or {}
 
-    def _has_missing(raw: RawScores) -> bool:
-        return (
-            raw.metascore is None
-            or raw.imdb_rating is None
-            or raw.review_count == 0
-            or raw.letterboxd_rating is None
-        )
-
-    total = sum(1 for raw in raw_scores if _has_missing(raw)) + len(failed)
+    # raw_scores should already include the workbook's existing values, so
+    # only fields that are blank everywhere are asked about.  A failed movie
+    # whose row is already complete isn't asked about either.
+    failed_to_ask = [t for t in failed if has_blank_scores(existing.get(t))]
+    total = sum(1 for raw in raw_scores if has_blank_scores(raw)) + len(failed_to_ask)
     position = 0
     entered = 0
     interrupted = False
 
     updated_raw = []
     for raw in raw_scores:
-        if _has_missing(raw) and not interrupted:
+        if has_blank_scores(raw) and not interrupted:
             position += 1
             try:
                 filled = prompt_missing_scores(raw, position, total)
@@ -289,12 +313,12 @@ def apply_manual_entry(
 
     still_failed = []
     for title in failed:
-        if interrupted:
+        if interrupted or title not in failed_to_ask:
             still_failed.append(title)
             continue
         position += 1
         try:
-            result = prompt_failed_movie(title, position, total)
+            result = prompt_failed_movie(title, position, total, existing=existing.get(title))
         except ManualEntryInterrupted as exc:
             interrupted = True
             result = exc.partial

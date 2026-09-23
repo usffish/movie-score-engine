@@ -47,6 +47,7 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from excel import (
+    MANUAL_FIELDS,
     SCORE_COLUMN_MAP,
     ensure_headers,
     extend_table_to_stability_cols,
@@ -54,10 +55,12 @@ from excel import (
     load_workbook_from_path,
     migrate_stability_columns,
     read_existing_scores,
+    read_manual_fields,
     read_prev_composite,
     read_years,
     should_update,
     update_stability,
+    write_manual_fields,
 )
 from manual import apply_manual_entry, prompt_unknown_years
 from scoring import (
@@ -292,6 +295,39 @@ def fetch_all(
 # Main orchestration
 # ---------------------------------------------------------------------------
 
+def _field_present(raw: RawScores, field: str) -> bool:
+    value = getattr(raw, field)
+    return value > 0 if field == "review_count" else value is not None
+
+
+def _scraped_fields(raw: RawScores) -> set:
+    """Column names (Metacritic, Reviews, Letterboxd, IMDB) a source supplied for *raw*."""
+    return {col for col, field in MANUAL_FIELDS.items() if _field_present(raw, field)}
+
+
+def _fill_from_existing(raw: RawScores, prev: Optional[RawScores]) -> RawScores:
+    """Fill scores the fetch didn't return with the workbook's existing values."""
+    if prev is None:
+        return raw
+    return dataclasses.replace(
+        raw,
+        metascore=raw.metascore if raw.metascore is not None else prev.metascore,
+        imdb_rating=raw.imdb_rating if raw.imdb_rating is not None else prev.imdb_rating,
+        letterboxd_rating=raw.letterboxd_rating if raw.letterboxd_rating is not None else prev.letterboxd_rating,
+        review_count=raw.review_count or prev.review_count,
+    )
+
+
+def _changed_fields(before: Optional[RawScores], after: RawScores) -> set:
+    """Column names whose score differs between *before* and *after* (i.e. typed in)."""
+    if before is None:
+        return _scraped_fields(after)
+    return {
+        col for col, field in MANUAL_FIELDS.items()
+        if _field_present(after, field) and getattr(after, field) != getattr(before, field)
+    }
+
+
 def update_workbook(
     input_path: Path,
     output_path: Path,
@@ -390,11 +426,10 @@ def update_workbook(
     movies = [t for _, t in movie_rows]
 
     existing_scores: dict = {}
-    if manual:
-        for ws_row, title in movie_rows:
-            prev = read_existing_scores(ws, ws_row, header_map)
-            prev.title = title
-            existing_scores[title] = prev
+    for ws_row, title in movie_rows:
+        prev = read_existing_scores(ws, ws_row, header_map)
+        prev.title = title
+        existing_scores[title] = prev
 
     raw_scores, failed = fetch_all(
         movies, api_key=api_key, delay=delay, verbose=verbose,
@@ -418,10 +453,25 @@ def update_workbook(
         # Ctrl-C during the year prompts stops all prompting, not just years.
         prompt_scores = not interrupted
 
+    # Which scores a source supplied this run — these replace hand-typed ones.
+    scraped_by_title = {r.title: _scraped_fields(r) for r in raw_scores}
+
+    # A score a source didn't return this run keeps its workbook value (typed
+    # in earlier, or scraped on a past run): it counts in the composite, and
+    # --manual doesn't ask for it again.
+    raw_scores = [_fill_from_existing(r, existing_scores.get(r.title)) for r in raw_scores]
+    before_manual = {r.title: r for r in raw_scores}
+
     raw_scores, failed, manual_unchanged = apply_manual_entry(
         raw_scores, failed, manual=prompt_scores, existing=existing_scores
     )
     year_by_title = {r.title: r.year for r in raw_scores}
+
+    # Which scores were typed in just now, recorded in the Manual column.
+    entered_by_title = {
+        r.title: _changed_fields(before_manual.get(r.title) or existing_scores.get(r.title), r)
+        for r in raw_scores
+    }
 
     fetched_titles = {r.title for r in raw_scores}
 
@@ -475,6 +525,12 @@ def update_workbook(
         year = year_by_title.get(title)
         if year is not None and header_map.get("Year"):
             ws.cell(row=ws_row, column=header_map["Year"], value=year)
+
+        # A scraped score replaces a typed one; newly typed scores are added.
+        manual_fields = read_manual_fields(ws, ws_row, header_map)
+        manual_fields -= scraped_by_title.get(title, set())
+        manual_fields |= entered_by_title.get(title, set())
+        write_manual_fields(ws, ws_row, header_map, manual_fields)
 
         is_unchanged = title in manual_unchanged
         update_stability(ws, ws_row, header_map, ns.composite, prev_comp, today, manual_unchanged=is_unchanged)
@@ -535,14 +591,17 @@ def parse_args(argv=None):
         help=(
             "Skip movies whose scores have been stable recently. "
             "A movie stable for N weeks is skipped for N weeks. "
-            "Movies with missing scores are always updated."
+            "Movies with a blank or hand-typed score are always re-checked, "
+            "so a source that adds the film later is picked up. "
+            "Reads the input workbook, so run it on the previous output."
         )
     )
     parser.add_argument(
         "--manual", action="store_true", dest="manual",
         help=(
-            "Prompt for manual entry when scores cannot be fetched automatically. "
-            "Existing values in the workbook are preserved when a field is skipped. "
+            "Prompt for unknown release years, then for scores that are blank in "
+            "the workbook and couldn't be fetched. Fields already filled (typed "
+            "in or scraped on an earlier run) aren't asked again. "
             "Ctrl-C stops the prompting and saves everything entered so far."
         )
     )

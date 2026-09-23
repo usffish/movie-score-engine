@@ -35,10 +35,10 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Resilient scraping** — all HTTP fetches retry up to 3 times with exponential back-off behind a thread-safe per-domain rate limiter. Per-movie failures are logged and skipped; the rest of the batch continues.
 - **Cloudflare-safe Metacritic requests** — Metacritic sits behind Cloudflare, which fingerprints the TLS handshake and serves older Python/OpenSSL builds a 403 "Just a moment…" challenge even with browser headers. Metacritic requests go through [`curl_cffi`](https://github.com/lexiforest/curl_cffi) impersonating Chrome, so it works regardless of the local Python build.
 - **Year disambiguation** — an optional `Year` column steers all three sources to the right film when several share a title (e.g. *Parasite* 2019 vs. 1982). Left blank, it's filled with the year the sources matched, or left blank when they disagree; `--manual` asks for it.
-- **Data safety** — existing cell values are never overwritten by a missing result. The input workbook is never modified.
+- **Data safety** — existing cell values are never overwritten by a missing result, and they still count in the composite when a source returns nothing this run. The input workbook is never modified.
 - **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
-- **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks. (It reads the *input* workbook — see [Usage](#usage) for running it on the previous output.)
-- **Interrupt-safe manual entry** — `--manual` shows how many movies are left to fill in, and Ctrl-C stops the prompting without discarding anything: entries already made — including the half-filled movie you were on — are still written to the output workbook.
+- **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks — except movies with a blank or hand-typed score, which are re-checked every run so a source that adds the film later is picked up. (It reads the *input* workbook — see [Usage](#usage) for running it on the previous output.)
+- **Manual entry that doesn't repeat itself** — `--manual` only asks about scores that are blank in the workbook, so anything you've typed in (or that was scraped before) is never asked again. Typed scores are tagged in a `Manual` column and replaced automatically once a source has the film. Ctrl-C stops the prompting without discarding anything already entered.
 - **AI-powered slug resolution** — optional Gemini integration looks up hard-to-find movie pages with Google Search as a last resort, only for sources that couldn't find the film at all, and never asks the AI for scores. Every answer is verified (title + year) before use, and answers are cached between runs.
 
 ---
@@ -72,6 +72,8 @@ For every title in a personal Movies.xlsx watchlist, the tool:
     ├── test_composite_properties.py      # Property: formula correctness + safety
     ├── test_scraper_properties.py        # Property: review count, rating range, back-off
     ├── test_orchestrator_properties.py   # Property: input unchanged, output columns
+    ├── test_manual.py                    # Manual prompts: progress counter, Ctrl-C handling
+    ├── test_manual_workbook.py           # Blank-only prompts, Manual column, smart-update re-checks, Table1
     ├── test_year_disambiguation.py       # Year matching, auto-fill, and manual year prompts
     ├── test_gemini_validation.py         # Gemini IDs/slugs rejected unless title + year match
     └── test_gemini_resolver.py           # Prompt, cache, model fallback, OMDb search, targeted retries
@@ -231,7 +233,9 @@ python update_scores.py --gemini-key $GEMINI_API_KEY
 
 On Windows, run these with the virtual environment's Python — `.venv\Scripts\python update_scores.py …` — or activate it first. A bare `python` may open the Microsoft Store instead.
 
-**`--smart-update` and the output file:** smart-update decides what to skip from the `StableWeeks` and `LastUpdated` columns of the *input* workbook. Results are written to a separate output file and the input is never changed, so running `--smart-update` on `Movies.xlsx` every time never skips anything. To build up stability history, run each time on the previous output, as in the example above (or copy `Movies_updated.xlsx` over `Movies.xlsx` between runs).
+**`--smart-update` and the output file:** smart-update decides what to skip from the `StableWeeks`, `LastUpdated` and `Manual` columns of the *input* workbook. Results are written to a separate output file and the input is never changed, so running `--smart-update` on `Movies.xlsx` every time never skips anything. To build up stability history, run each time on the previous output, as in the example above (or copy `Movies_updated.xlsx` over `Movies.xlsx` between runs).
+
+Movies with a blank score, or a score you typed in (listed in `Manual`), are never skipped: they're re-checked every run, so when Metacritic, Letterboxd or OMDb adds the film later, the real score is picked up. Re-checking is silent — with `--manual` you're still only asked about cells that are blank.
 
 ### All CLI options
 
@@ -245,7 +249,7 @@ On Windows, run these with the virtual environment's Python — `.venv\Scripts\p
 | --delay SECS | 1.0 | Seconds between requests to each source |
 | --verbose | off | Enable debug-level logging |
 | --smart-update | off | Skip recently-stable movies |
-| --manual | off | Prompt for unknown release years, then missing values, interactively (Ctrl-C saves and stops) |
+| --manual | off | Prompt for unknown release years, then for scores blank in the workbook (Ctrl-C saves and stops) |
 | --gemini-key KEY | — | Gemini API key for AI slug resolution (overrides GEMINI_API_KEY env var) |
 | --random | off | Process movies in random order |
 | --no-rate-limit | off | Disable the adaptive per-domain rate limiter (use the fixed `--delay` only) |
@@ -279,6 +283,11 @@ Leave Year blank and the script fills it in for you (see **Output columns**) —
 | TRUE | Weighted composite score (0.0–1.0, rounded to 2 dp) |
 | LastUpdated | ISO date of last successful fetch (YYYY-MM-DD) |
 | StableWeeks | Consecutive weeks the composite stayed within ±0.05 |
+| Manual | Scores in this row you typed in with `--manual` (e.g. `IMDB, Letterboxd`). Cleared per score once a source supplies it |
+
+If a source returns nothing for a score this run, the value already in the cell is kept and used in the `st.*` and `TRUE` calculations. To clear a wrong value, delete the cell (and its entry in `Manual`).
+
+If the workbook has an Excel table named `Table1`, it's extended to cover any column the script adds (`Year`, `Manual`), so sorting the table in Excel keeps each row together.
 
 ---
 
@@ -292,7 +301,7 @@ Leave Year blank and the script fills it in for you (see **Output columns**) —
     Release year: 2026
 ```
 
-It then prompts for any score the scrapers could not fetch. Each prompt shows where you are in the queue:
+It then prompts for scores that are **blank in the workbook** and couldn't be fetched this run. Each prompt shows where you are in the queue:
 
 ```
   ── Manual entry for: Nirvana the Band the Show the Movie ── [3/12 · 9 left]
@@ -300,11 +309,17 @@ It then prompts for any score the scrapers could not fetch. Each prompt shows wh
 
   Metascore (0-100): 74
   IMDB rating (0.0-10.0):
+  Critic review count (0+): 12
 ```
 
-The count covers movies with at least one missing field plus movies that failed entirely — fully-fetched movies are never prompted for.
+- **Only blank cells are asked about.** A score already in the workbook — typed in on an earlier run, or scraped before — isn't asked again, even if the source still doesn't have it. So once you've filled a movie in, later runs stay quiet about it.
+- **Critic review count is only asked alongside a Metascore you type in.** A movie with no Metacritic page has no count to know, so it isn't asked on its own.
+- **Typed scores are tagged** in the `Manual` column. They count in the composite like any other score, and smart-update keeps re-checking the movie. When a source adds the film, its score replaces yours and the tag is removed.
+- **Movies that failed to fetch entirely** are asked about only for the fields their row is missing.
 
-Press Enter to skip a field; the existing workbook value is left untouched. **Ctrl-C (or end of input) stops the prompting without losing work** — every entry already made is written to the output workbook, including the fields typed for the movie you were on when you interrupted. Movies not yet reached keep whatever the scrapers found, so the next run only asks about what's still missing.
+The count covers movies with at least one blank score plus failed movies with blanks — complete movies are never prompted for.
+
+Press Enter to skip a field; the cell stays blank and you'll be asked again next run. **Ctrl-C (or end of input) stops the prompting without losing work** — every entry already made is written to the output workbook, including the fields typed for the movie you were on when you interrupted.
 
 ---
 
@@ -346,6 +361,7 @@ To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI. To turn it of
 | A movie's scores look wrong, or its `Year` is blank | The sources matched different films with the same title. Check the run log's `Year: sources matched different films` line, then enter the right release year in the `Year` column (or answer the year prompt in `--manual`) |
 | The run ends with `PermissionError` when saving | The output workbook is open in Excel, which locks it on Windows. Close it and re-run |
 | `GeminiResolver: … API key not valid` | `GEMINI_API_KEY` in `.env` is still the `your_gemini_key_here` placeholder or is wrong. Set a real key, or remove the line to turn Gemini off |
+| A score you typed in is wrong, or you want to be asked again | Delete the cell (and its entry in the `Manual` column) in the workbook you feed back in; the next `--manual` run asks for it |
 | A Gemini answer looks wrong or stale | Delete `.gemini_cache.json` to clear cached answers (they also expire after 30 days) |
 | IMDB rating differs slightly from imdb.com | OMDb's copy of IMDb ratings lags a few days, most noticeably for new releases still gaining votes. The film is right; the number catches up |
 
