@@ -42,6 +42,26 @@ def years_differ(a: Optional[int], b: Optional[int]) -> bool:
     return a is not None and b is not None and abs(a - b) > YEAR_TOLERANCE
 
 
+def normalise_title(text: str) -> str:
+    """
+    Reduce a title to a comparable form: ASCII, lowercase, '&' -> 'and',
+    punctuation dropped, leading article removed, whitespace collapsed.
+    "Oasis: Don't Look Back In Anger" and "Oasis: Don't Look Back in Anger"
+    normalise to the same string.
+    """
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii").lower()
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^\w\s]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"^(the|a|an) ", "", text)
+
+
+def titles_match(a: Optional[str], b: Optional[str]) -> bool:
+    """True when both titles are known and name the same film."""
+    return bool(a) and bool(b) and normalise_title(a) == normalise_title(b)
+
+
 def slugify(text: str) -> str:
     """Convert a title to a hyphenated ASCII slug (shared base for all scrapers)."""
     text = unicodedata.normalize("NFKD", text)

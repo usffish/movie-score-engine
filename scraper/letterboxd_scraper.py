@@ -15,7 +15,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from scraper.http import retry_get, slugify as _slugify, years_differ
+from scraper.http import retry_get, slugify as _slugify, titles_match, years_differ
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,14 @@ def _parse_year_from_soup(soup: BeautifulSoup) -> Optional[int]:
         match = re.search(r"\((\d{4})\)\s*$", meta["content"])
         if match:
             return int(match.group(1))
+    return None
+
+
+def _parse_title_from_soup(soup: BeautifulSoup) -> Optional[str]:
+    """Film title from og:title with the trailing year removed: 'Parasite (2019)' -> 'Parasite'."""
+    meta = soup.find("meta", property="og:title")
+    if meta and meta.get("content"):
+        return re.sub(r"\s*\(\d{4}\)\s*$", "", meta["content"]).strip()
     return None
 
 
@@ -238,6 +246,14 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
         if gemini_slug:
             url = _FILM_URL.format(slug=gemini_slug)
             soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
+            if soup is not None and (
+                not titles_match(_parse_title_from_soup(soup), title) or _year_mismatch(soup, year)
+            ):
+                logger.warning(
+                    "Letterboxd: rejected Gemini slug '%s' for '%s' — it's '%s' (%s)",
+                    gemini_slug, title, _parse_title_from_soup(soup), _parse_year_from_soup(soup),
+                )
+                soup = None
             if soup is not None:
                 logger.info("Letterboxd: Gemini resolved slug '%s' for '%s'", gemini_slug, title)
                 result["url"] = url
@@ -253,20 +269,23 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
 def get_letterboxd_data_with_slug(slug: Optional[str], rate_limiter=None) -> dict:
     """
     Fetch Letterboxd data using a pre-resolved slug.
-    Returns dict with rating, rating_count, and url.
+    Returns dict with rating, rating_count, url, year, and title (the page's
+    film title, so callers can check it's the right film).
     """
+    empty = {"rating": None, "rating_count": None, "url": None, "year": None, "title": None}
     if not slug:
-        return {"rating": None, "rating_count": None, "url": None}
+        return empty
 
     url = _FILM_URL.format(slug=slug)
     soup = _fetch(url, rate_limiter=rate_limiter)
 
     if soup is None:
-        return {"rating": None, "rating_count": None, "url": None}
+        return empty
 
     return {
         "rating": _parse_rating_from_soup(soup),
         "rating_count": _parse_review_count_from_soup(soup),
         "url": url,
         "year": _parse_year_from_soup(soup),
+        "title": _parse_title_from_soup(soup),
     }

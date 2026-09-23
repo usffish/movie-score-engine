@@ -20,7 +20,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from scraper.http import retry_get, slugify as _slugify_base, years_differ
+from scraper.http import retry_get, slugify as _slugify_base, titles_match, years_differ
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,23 @@ def _extract_release_year(soup: BeautifulSoup) -> Optional[int]:
     return None
 
 
+def _extract_title(soup: BeautifulSoup) -> Optional[str]:
+    """Film title from JSON-LD 'name', falling back to og:title minus ' Reviews - Metacritic'."""
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            if isinstance(data, list):
+                data = data[0]
+            if data.get("name"):
+                return str(data["name"]).strip()
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            continue
+    meta = soup.find("meta", property="og:title")
+    if meta and meta.get("content"):
+        return re.sub(r"\s+Reviews\s+-\s+Metacritic\s*$", "", meta["content"]).strip()
+    return None
+
+
 def _year_mismatch(soup: BeautifulSoup, year: Optional[int]) -> bool:
     """True when a year was requested and the page is clearly for a different film."""
     if not year:
@@ -284,6 +301,14 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
         if gemini_slug:
             url = _MOVIE_URL.format(slug=gemini_slug)
             soup = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
+            if soup is not None and (
+                not titles_match(_extract_title(soup), title) or _year_mismatch(soup, year)
+            ):
+                logger.warning(
+                    "Metacritic: rejected Gemini slug '%s' for '%s' — it's '%s' (%s)",
+                    gemini_slug, title, _extract_title(soup), _extract_release_year(soup),
+                )
+                soup = None
             if soup is not None:
                 matched_slug = gemini_slug
                 logger.info("Metacritic: Gemini resolved slug '%s' for '%s'", gemini_slug, title)
@@ -344,18 +369,19 @@ def _extract_scores_from_soup(soup, slug: str, rate_limiter=None, label: str = "
 def get_metacritic_data_with_slug(slug: Optional[str], rate_limiter=None) -> dict:
     """
     Fetch Metacritic data using a pre-resolved slug.
-    Returns dict with review_count and metascore.
+    Returns dict with review_count, metascore, year, and title (the page's
+    film title, so callers can check it's the right film).
     """
     if not slug:
-        return {"review_count": 0, "metascore": None, "year": None}
+        return {"review_count": 0, "metascore": None, "year": None, "title": None}
 
     url = _MOVIE_URL.format(slug=slug)
     soup = _fetch(url, rate_limiter=rate_limiter)
 
     if soup is None:
-        return {"review_count": 0, "metascore": None, "year": None}
+        return {"review_count": 0, "metascore": None, "year": None, "title": None}
 
-    return _extract_scores_from_soup(soup, slug, rate_limiter)
+    return {**_extract_scores_from_soup(soup, slug, rate_limiter), "title": _extract_title(soup)}
 
 
 def get_review_count(title: str, year: Optional[int] = None, resolver=None) -> int:

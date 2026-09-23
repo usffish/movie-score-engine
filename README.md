@@ -69,7 +69,8 @@ For every title in a personal Movies.xlsx watchlist, the tool:
     ├── test_composite_properties.py      # Property: formula correctness + safety
     ├── test_scraper_properties.py        # Property: review count, rating range, back-off
     ├── test_orchestrator_properties.py   # Property: input unchanged, output columns
-    └── test_year_disambiguation.py       # Year matching, auto-fill, and manual year prompts
+    ├── test_year_disambiguation.py       # Year matching, auto-fill, and manual year prompts
+    └── test_gemini_validation.py         # Gemini IDs/slugs rejected unless title + year match
 ```
 
 ---
@@ -307,7 +308,8 @@ When a movie title doesn't match the URL slug conventions of Metacritic, Letterb
 2. If that fails, the scraper attempts a search fallback
 3. Only when both fail does GeminiResolver kick in — it asks Gemini for the exact slug or IMDb ID
 4. The AI **never provides scores** — only URL identifiers
-5. **Enhanced retry logic**: Gemini now helps with movies that fail ANY scraper (not just all 3), improving coverage for partially missing data
+5. **Every answer is verified** before its scores are used: the page Gemini points to must have the same title (ignoring case and punctuation) and a release year within 2 years of the one you entered or the other sources agree on. Anything else is discarded with a `Gemini: rejected …` warning and the field stays blank for `--manual`. This matters because Gemini invents IMDb IDs — in testing it returned IDs for TV episodes and unrelated 1920s–1990s films, which unchecked would have put another film's IMDB rating in the workbook
+6. **Enhanced retry logic**: Gemini now helps with movies that fail ANY scraper (not just all 3), improving coverage for partially missing data
 
 **Example:**
 ```python

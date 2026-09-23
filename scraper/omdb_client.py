@@ -13,7 +13,7 @@ from typing import Optional
 
 import requests
 
-from scraper.http import retry_get, years_differ
+from scraper.http import retry_get, titles_match, years_differ
 
 logger = logging.getLogger(__name__)
 
@@ -146,8 +146,15 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
                     rate_limiter=rate_limiter, domain="omdbapi.com",
                 )
                 if id_data and id_data.get("Response") != "False":
-                    logger.info("OMDb: Gemini resolved IMDb ID '%s' for '%s'", imdb_id, title)
-                    return _to_result(id_data, imdb_id)
+                    found = id_data.get("Title")
+                    if not titles_match(found, title) or years_differ(_parse_year(id_data.get("Year")), year):
+                        logger.warning(
+                            "OMDb: rejected Gemini IMDb ID '%s' for '%s' — it's '%s' (%s)",
+                            imdb_id, title, found, id_data.get("Year"),
+                        )
+                    else:
+                        logger.info("OMDb: Gemini resolved IMDb ID '%s' for '%s'", imdb_id, title)
+                        return _to_result(id_data, imdb_id)
 
         return dict(_FALLBACK)
 
@@ -157,15 +164,16 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
 def get_omdb_data_with_id(api_key: str, imdb_id: Optional[str], rate_limiter=None) -> dict:
     """
     Fetch OMDb data using a pre-resolved IMDb ID.
-    Returns dict with metascore, imdb_rating, imdb_id.
+    Returns dict with metascore, imdb_rating, imdb_id, year, and title (the
+    title OMDb has for that ID, so callers can check it's the right film).
     """
     if not imdb_id:
-        return dict(_FALLBACK)
+        return {**_FALLBACK, "title": None}
 
     data = _fetch(_OMDB_URL, {"i": imdb_id, "apikey": api_key},
                   rate_limiter=rate_limiter, domain="omdbapi.com")
 
     if data is None or data.get("Response") == "False":
-        return dict(_FALLBACK)
+        return {**_FALLBACK, "title": None}
 
-    return _to_result(data, imdb_id)
+    return {**_to_result(data, imdb_id), "title": data.get("Title")}

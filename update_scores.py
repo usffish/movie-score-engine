@@ -71,7 +71,7 @@ from scoring import (
     format_source_years,
     resolve_year,
 )
-from scraper.http import RateLimiter
+from scraper.http import RateLimiter, titles_match, years_differ
 from scraper.gemini_resolver import GeminiResolver
 from scraper.letterboxd_scraper import get_letterboxd_data, get_letterboxd_data_with_slug
 from scraper.metacritic_scraper import get_metacritic_data, get_metacritic_data_with_slug
@@ -90,6 +90,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Pass 1: Fetch all raw scores (with Gemini retry for failures)
 # ---------------------------------------------------------------------------
+
+def _gemini_match_ok(source: str, gemini_id: str, title: str,
+                     expected_year: Optional[int], result: dict) -> bool:
+    """
+    Check that the page a Gemini-supplied ID/slug points to is the movie we
+    asked about: same title, and release year within tolerance of the
+    expected one.  Gemini can invent IDs (e.g. an IMDb ID for an unrelated
+    TV episode), and an unchecked one would put another film's score in the
+    workbook.
+    """
+    found_title, found_year = result.get("title"), result.get("year")
+    if found_title is None:
+        return False  # not found, nothing to use
+    if not titles_match(found_title, title):
+        logger.warning(
+            "Gemini: rejected %s '%s' for '%s' — it's '%s' (%s)",
+            source, gemini_id, title, found_title, found_year,
+        )
+        return False
+    if expected_year is not None and years_differ(found_year, expected_year):
+        logger.warning(
+            "Gemini: rejected %s '%s' for '%s' — it's from %s, expected %s",
+            source, gemini_id, title, found_year, expected_year,
+        )
+        return False
+    return True
+
 
 def fetch_all(
     movies: list[str],
@@ -200,29 +227,32 @@ def fetch_all(
 
                 existing = raw_scores[existing_idx]
                 source_years = dict(existing.source_years)
+                # Year the Gemini match must be close to: the user's, else what
+                # the other sources already agree on (None = title check only).
+                expected_year = resolve_year(years.get(title), source_years)
 
+                imdb_rating = existing.imdb_rating
                 if existing.imdb_rating is None and gemini_imdb_id:
                     omdb = get_omdb_data_with_id(api_key, gemini_imdb_id, rate_limiter=rate_limiter)
-                    imdb_rating = omdb.get("imdb_rating")
-                    source_years["OMDb"] = omdb.get("year")
-                else:
-                    imdb_rating = existing.imdb_rating
+                    if _gemini_match_ok("OMDb", gemini_imdb_id, title, expected_year, omdb):
+                        imdb_rating = omdb.get("imdb_rating")
+                        source_years["OMDb"] = omdb.get("year")
 
+                metascore = existing.metascore
+                review_count = existing.review_count
                 if existing.metascore is None and existing.review_count == 0 and gemini_metacritic_slug:
                     mc = get_metacritic_data_with_slug(gemini_metacritic_slug, rate_limiter=rate_limiter)
-                    metascore = mc.get("metascore")
-                    review_count = mc.get("review_count", 0)
-                    source_years["Metacritic"] = mc.get("year")
-                else:
-                    metascore = existing.metascore
-                    review_count = existing.review_count
+                    if _gemini_match_ok("Metacritic", gemini_metacritic_slug, title, expected_year, mc):
+                        metascore = mc.get("metascore")
+                        review_count = mc.get("review_count", 0)
+                        source_years["Metacritic"] = mc.get("year")
 
+                letterboxd_rating = existing.letterboxd_rating
                 if existing.letterboxd_rating is None and gemini_letterboxd_slug:
                     lb = get_letterboxd_data_with_slug(gemini_letterboxd_slug, rate_limiter=rate_limiter)
-                    letterboxd_rating = lb.get("rating")
-                    source_years["Letterboxd"] = lb.get("year")
-                else:
-                    letterboxd_rating = existing.letterboxd_rating
+                    if _gemini_match_ok("Letterboxd", gemini_letterboxd_slug, title, expected_year, lb):
+                        letterboxd_rating = lb.get("rating")
+                        source_years["Letterboxd"] = lb.get("year")
 
                 raw_scores[existing_idx] = RawScores(
                     title=title,
