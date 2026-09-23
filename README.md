@@ -20,9 +20,10 @@ For every title in a personal Movies.xlsx watchlist, the tool:
    - For 1-3 reviews: Averages individual critic scores from the reviews page
    - For 0 reviews: Returns `None` (no default value)
 3. Scrapes **average community rating** from Letterboxd
-4. Normalises all three scores column-wide using min-max scaling
-5. Computes a **review-count-weighted composite score** grounded in Bayesian statistics
-6. Writes results to Movies_updated.xlsx, leaving the original file untouched
+4. Checks all three sources matched the **same film** by release year, and records that year in the `Year` column (blank when they disagree)
+5. Normalises all three scores column-wide using min-max scaling
+6. Computes a **review-count-weighted composite score** grounded in Bayesian statistics
+7. Writes results to Movies_updated.xlsx, leaving the original file untouched
 
 ---
 
@@ -36,7 +37,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Year disambiguation** — an optional `Year` column steers all three sources to the right film when several share a title (e.g. *Parasite* 2019 vs. 1982). Left blank, it's filled with the year the sources matched, or left blank when they disagree; `--manual` asks for it.
 - **Data safety** — existing cell values are never overwritten by a missing result. The input workbook is never modified.
 - **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
-- **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks.
+- **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks. (It reads the *input* workbook — see [Usage](#usage) for running it on the previous output.)
 - **Interrupt-safe manual entry** — `--manual` shows how many movies are left to fill in, and Ctrl-C stops the prompting without discarding anything: entries already made — including the half-filled movie you were on — are still written to the output workbook.
 - **AI-powered slug resolution** — optional Gemini integration looks up hard-to-find movie pages with Google Search as a last resort, only for sources that couldn't find the film at all, and never asks the AI for scores. Every answer is verified (title + year) before use, and answers are cached between runs.
 
@@ -51,10 +52,12 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 ├── excel.py                  # Workbook I/O, header management, Year column, stability tracking
 ├── manual.py                 # Interactive prompts for unknown years and missing scores
 ├── requirements.txt
+├── .env.example              # Template for .env (API keys)
 ├── Movies.xlsx               # Input watchlist (user-provided, not committed)
 ├── Movies_updated.xlsx       # Generated output (not committed)
+├── .gemini_cache.json        # Cached Gemini answers (generated, not committed)
 ├── scraper/
-│   ├── http.py               # Shared HTTP retry util, RateLimiter, slugify()
+│   ├── http.py               # Shared HTTP retry util, RateLimiter, slugify(), title/year matching
 │   ├── omdb_client.py        # OMDb API client — Metascore + IMDB rating + release year
 │   ├── metacritic_scraper.py # Scrapes critic review count + Metascore (curl_cffi, Cloudflare-safe)
 │   ├── letterboxd_scraper.py # Scrapes average community rating
@@ -213,10 +216,10 @@ python update_scores.py --random
 # Use a custom input file
 python update_scores.py --input my_list.xlsx
 
-# Skip recently-stable movies
-python update_scores.py --smart-update
+# Skip recently-stable movies (see note below)
+python update_scores.py --input Movies_updated.xlsx --output Movies_updated.xlsx --smart-update
 
-# Prompt for missing values when scraping fails
+# Ask for unknown release years and missing values
 python update_scores.py --manual
 
 # Adjust request delay (default 1.0s between sources)
@@ -225,6 +228,10 @@ python update_scores.py --delay 2.0
 # Enable AI-powered slug resolution for hard-to-find movies
 python update_scores.py --gemini-key $GEMINI_API_KEY
 ```
+
+On Windows, run these with the virtual environment's Python — `.venv\Scripts\python update_scores.py …` — or activate it first. A bare `python` may open the Microsoft Store instead.
+
+**`--smart-update` and the output file:** smart-update decides what to skip from the `StableWeeks` and `LastUpdated` columns of the *input* workbook. Results are written to a separate output file and the input is never changed, so running `--smart-update` on `Movies.xlsx` every time never skips anything. To build up stability history, run each time on the previous output, as in the example above (or copy `Movies_updated.xlsx` over `Movies.xlsx` between runs).
 
 ### All CLI options
 
@@ -241,12 +248,13 @@ python update_scores.py --gemini-key $GEMINI_API_KEY
 | --manual | off | Prompt for unknown release years, then missing values, interactively (Ctrl-C saves and stops) |
 | --gemini-key KEY | — | Gemini API key for AI slug resolution (overrides GEMINI_API_KEY env var) |
 | --random | off | Process movies in random order |
+| --no-rate-limit | off | Disable the adaptive per-domain rate limiter (use the fixed `--delay` only) |
 
 ---
 
 ## Input format
 
-Place your watchlist in Movies.xlsx in the project root. The workbook must have a column named **Movies** with one title per row. All other columns are optional — the script adds any missing output columns automatically.
+Place your watchlist in Movies.xlsx in the project root. The workbook must have a column named **Movies** with one title per row. All other columns are optional — the script adds any missing output columns automatically. The input is never modified unless you point `--output` at it.
 
 An optional **Year** column (release year) disambiguates films that share a title. When present, the year is sent to OMDb, and Metacritic and Letterboxd try the year-suffixed slug first (e.g. `/movie/buddy-2026/`, `/film/parasite-2019/`) and skip any page whose release year is more than 2 years off. Without it, `Parasite` resolves to the 1982 film on Letterboxd and `Buddy` to the 2019 film on Metacritic.
 
@@ -280,7 +288,7 @@ Leave Year blank and the script fills it in for you (see **Output columns**) —
 
 ```
   Buddy [1/2 · 1 left]
-    found: Metacritic 2019 · Letterboxd 2019 · OMDb 2026
+    found: Metacritic 2019 · Letterboxd 1997 · OMDb 2026
     Release year: 2026
 ```
 
@@ -330,6 +338,19 @@ To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI. To turn it of
 
 ---
 
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| `Metacritic: HTTP 403` on every movie, `Reviews` always 0 | Cloudflare is challenging your Python's TLS fingerprint. Make sure `curl_cffi` is installed (`pip install -r requirements.txt`); upgrading to a current Python also helps |
+| A movie's scores look wrong, or its `Year` is blank | The sources matched different films with the same title. Check the run log's `Year: sources matched different films` line, then enter the right release year in the `Year` column (or answer the year prompt in `--manual`) |
+| The run ends with `PermissionError` when saving | The output workbook is open in Excel, which locks it on Windows. Close it and re-run |
+| `GeminiResolver: … API key not valid` | `GEMINI_API_KEY` in `.env` is still the `your_gemini_key_here` placeholder or is wrong. Set a real key, or remove the line to turn Gemini off |
+| A Gemini answer looks wrong or stale | Delete `.gemini_cache.json` to clear cached answers (they also expire after 30 days) |
+| IMDB rating differs slightly from imdb.com | OMDb's copy of IMDb ratings lags a few days, most noticeably for new releases still gaining votes. The film is right; the number catches up |
+
+---
+
 ## Running the tests
 
 ```bash
@@ -342,6 +363,8 @@ python -m pytest -v
 # Property-based tests only
 python -m pytest tests/test_normalisation_properties.py tests/test_composite_properties.py tests/test_scraper_properties.py tests/test_omdb_properties.py tests/test_orchestrator_properties.py
 ```
+
+All network calls (OMDb, Metacritic, Letterboxd, Gemini) are mocked, so the suite runs offline and needs no API keys.
 
 ---
 
