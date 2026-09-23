@@ -38,7 +38,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
 - **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks.
 - **Interrupt-safe manual entry** — `--manual` shows how many movies are left to fill in, and Ctrl-C stops the prompting without discarding anything: entries already made — including the half-filled movie you were on — are still written to the output workbook.
-- **AI-powered slug resolution** — optional Gemini API integration resolves hard-to-find movie slugs as a last resort when local heuristics and site search both fail, without ever asking the AI for scores. Activates per-scraper, so a single failed source triggers a targeted retry rather than a full re-fetch.
+- **AI-powered slug resolution** — optional Gemini integration looks up hard-to-find movie pages with Google Search as a last resort, only for sources that couldn't find the film at all, and never asks the AI for scores. Every answer is verified (title + year) before use, and answers are cached between runs.
 
 ---
 
@@ -58,7 +58,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 │   ├── omdb_client.py        # OMDb API client — Metascore + IMDB rating + release year
 │   ├── metacritic_scraper.py # Scrapes critic review count + Metascore (curl_cffi, Cloudflare-safe)
 │   ├── letterboxd_scraper.py # Scrapes average community rating
-│   └── gemini_resolver.py    # AI-powered slug resolution (optional)
+│   └── gemini_resolver.py    # Gemini + Google Search slug/ID lookup, answer cache (optional)
 └── tests/
     ├── test_omdb_client.py
     ├── test_metacritic_scraper.py
@@ -70,7 +70,8 @@ For every title in a personal Movies.xlsx watchlist, the tool:
     ├── test_scraper_properties.py        # Property: review count, rating range, back-off
     ├── test_orchestrator_properties.py   # Property: input unchanged, output columns
     ├── test_year_disambiguation.py       # Year matching, auto-fill, and manual year prompts
-    └── test_gemini_validation.py         # Gemini IDs/slugs rejected unless title + year match
+    ├── test_gemini_validation.py         # Gemini IDs/slugs rejected unless title + year match
+    └── test_gemini_resolver.py           # Prompt, cache, model fallback, OMDb search, targeted retries
 ```
 
 ---
@@ -160,7 +161,7 @@ Missing scores are dropped from both numerator and denominator, not substituted 
 
 ## Setup
 
-**Requirements:** Python 3.9+, a free [OMDb API key](https://www.omdbapi.com/apikey.aspx)
+**Requirements:** Python 3.10+ (the `google-genai` library used for the optional Gemini lookup needs 3.10), a free [OMDb API key](https://www.omdbapi.com/apikey.aspx)
 
 ```bash
 # Create and activate a virtual environment
@@ -190,7 +191,7 @@ GEMINI_API_KEY=your_gemini_key_here
 
 The application loads `.env` automatically. You can also set these via environment variables or pass them as CLI flags (`--api-key`, `--gemini-key`).
 
-**Optional:** Set `GEMINI_API_KEY` to enable AI-powered slug resolution for movies that fail to match via local heuristics. This uses the Gemini API to find the correct URL slug for Metacritic, Letterboxd, or the IMDb ID for OMDb — but never asks the AI for scores.
+**Optional:** Set `GEMINI_API_KEY` to enable AI-powered slug resolution for movies a source can't find at all. This uses Gemini with Google Search to find the correct URL slug for Metacritic, Letterboxd, or the IMDb ID for OMDb — but never asks the AI for scores. See [AI-Powered Slug Resolution](#ai-powered-slug-resolution).
 
 ---
 
@@ -301,26 +302,31 @@ Press Enter to skip a field; the existing workbook value is left untouched. **Ct
 
 ## AI-Powered Slug Resolution
 
-When a movie title doesn't match the URL slug conventions of Metacritic, Letterboxd, or OMDb, the scrapers will fail. The optional `GeminiResolver` uses the Gemini API to resolve the correct slug as a last-resort fallback.
+When a movie title doesn't match the URL slug conventions of Metacritic, Letterboxd, or OMDb, the scrapers will fail. The optional `GeminiResolver` uses the Gemini API to find the correct page as a last-resort fallback.
 
 **How it works:**
-1. Local slug heuristics are tried first (lowercase, hyphens, remove articles, etc.)
-2. If that fails, the scraper attempts a search fallback
-3. Only when both fail does GeminiResolver kick in — it asks Gemini for the exact slug or IMDb ID
-4. The AI **never provides scores** — only URL identifiers
-5. **Every answer is verified** before its scores are used: the page Gemini points to must have the same title (ignoring case and punctuation) and a release year within 2 years of the one you entered or the other sources agree on. Anything else is discarded with a `Gemini: rejected …` warning and the field stays blank for `--manual`. This matters because Gemini invents IMDb IDs — in testing it returned IDs for TV episodes and unrelated 1920s–1990s films, which unchecked would have put another film's IMDB rating in the workbook
-6. **Enhanced retry logic**: Gemini now helps with movies that fail ANY scraper (not just all 3), improving coverage for partially missing data
+1. Local slug heuristics are tried first (lowercase, hyphens, remove articles, year suffix, etc.)
+2. If that fails, each source's own search is tried. For OMDb that's its search endpoint (`?s=`), which returns real titles with years and IMDb IDs; a result is used only if the title matches and the year is within 2 years (or, with no year, it's the only film by that title)
+3. Only when both fail does GeminiResolver kick in, and **only for the sources that couldn't find the film at all**. A film that was found but has no score yet — a new release with no IMDB rating on OMDb, say — isn't sent to Gemini, since a better ID can't fix missing data
+4. Gemini is told the release year (from the Year column, or the year the other sources agree on) and looks the identifier up with **Google Search grounding** rather than recalling it. In testing, without grounding every model invented a wrong IMDb ID for *Without Blood*; with grounding all of them returned the right one
+5. The AI **never provides scores** — only URL identifiers
+6. **Every answer is verified** before its scores are used: the page Gemini points to must have the same title (ignoring case, punctuation and a leading "Prefix:", since IMDb lists *Oasis: Don't Look Back In Anger* as *Don't Look Back in Anger*) and a release year within 2 years of the one you entered or the other sources agree on. Anything else is discarded with a `Gemini: rejected …` warning and the field stays blank for `--manual`
+7. **Answers are cached** in `.gemini_cache.json` next to your workbook (git-ignored), keyed by title and year, for 30 days. Repeat runs reuse them instead of calling the API, and an answer that failed verification is remembered so it isn't tried again. Delete the file to start fresh
+
+**Models:** `gemini-3-flash-preview` first, then `gemini-3.1-flash-lite-preview`, then `gemini-2.5-flash-lite`. A model that's rate limited, unavailable to your key, or doesn't support search grounding is skipped for the rest of the run; a request that times out (90 s) or comes back empty is retried on the next model. In a test of six hard titles, `gemini-3-flash-preview` confirmed four (20–60 s each), `3.1-flash-lite` two (~3 s) and `2.5-flash-lite` none — and none of them returned a wrong film.
+
+**Cost:** search-grounded requests may be billed separately from ordinary Gemini requests once past any free allowance — check the current Gemini API pricing for your plan. The steps above keep calls to a handful per run.
 
 **Example:**
 ```python
 from scraper import GeminiResolver
 
-resolver = GeminiResolver(api_key="your_gemini_key")
-slug = resolver.resolve_metacritic_slug("Nirvana the Band the Show the Movie")
-# Returns: "nirvana-the-band-the-show-the-movie"
+resolver = GeminiResolver(api_key="your_gemini_key", cache_path=".gemini_cache.json")
+ids = resolver.resolve_all_ids("Without Blood", year=2024, want=("imdb_id",))
+# Returns: {"metacritic_slug": None, "letterboxd_slug": None, "imdb_id": "tt18398986"}
 ```
 
-To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI.
+To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI. To turn it off, remove the key.
 
 ---
 

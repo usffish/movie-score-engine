@@ -52,14 +52,32 @@ def normalise_title(text: str) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = text.encode("ascii", "ignore").decode("ascii").lower()
     text = text.replace("&", " and ")
+    # Separators become spaces so "Fall 2:DeadPoint" matches "Fall 2: Deadpoint";
+    # other punctuation is dropped so "Don't" matches "Dont".
+    text = re.sub(r"[:/\-–—]", " ", text)
     text = re.sub(r"[^\w\s]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return re.sub(r"^(the|a|an) ", "", text)
 
 
 def titles_match(a: Optional[str], b: Optional[str]) -> bool:
-    """True when both titles are known and name the same film."""
-    return bool(a) and bool(b) and normalise_title(a) == normalise_title(b)
+    """
+    True when both titles are known and name the same film.
+
+    Also true when one title is the other with a "Prefix:" in front, since
+    sources differ on whether to include it: IMDb lists "Oasis: Don't Look
+    Back In Anger" as "Don't Look Back in Anger".  Callers pair this with a
+    year check, which keeps unrelated films that share a subtitle apart.
+    """
+    if not a or not b:
+        return False
+    na, nb = normalise_title(a), normalise_title(b)
+    if na == nb:
+        return True
+    for full, other in ((a, nb), (b, na)):
+        if ":" in full and normalise_title(full.rsplit(":", 1)[1]) == other:
+            return True
+    return False
 
 
 def slugify(text: str) -> str:

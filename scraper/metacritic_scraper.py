@@ -255,8 +255,10 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
             review_count (int):         >= 0; 0 when not found or on error.
             metascore    (int | None):  0–100; None when unavailable.
             year         (int | None):  release year of the matched page.
+            url          (str | None):  the matched page; None when no page was found
+                                        (as opposed to a page with no score yet).
     """
-    result: dict = {"review_count": 0, "metascore": None, "year": None}
+    result: dict = {"review_count": 0, "metascore": None, "year": None, "url": None}
 
     slug_no_article = _slugify(title)
     slug_with_article = _slugify_with_article(title)
@@ -297,7 +299,7 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
 
     if soup is None and resolver is not None:
         logger.info("Metacritic: site search failed for '%s', asking Gemini", title)
-        gemini_slug = resolver.resolve_metacritic_slug(title)
+        gemini_slug = resolver.resolve_metacritic_slug(title, year)
         if gemini_slug:
             url = _MOVIE_URL.format(slug=gemini_slug)
             soup = _fetch(url, rate_limiter=rate_limiter, domain="metacritic.com")
@@ -308,6 +310,7 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
                     "Metacritic: rejected Gemini slug '%s' for '%s' — it's '%s' (%s)",
                     gemini_slug, title, _extract_title(soup), _extract_release_year(soup),
                 )
+                resolver.mark_rejected(title, year, "metacritic_slug", gemini_slug)
                 soup = None
             if soup is not None:
                 matched_slug = gemini_slug
@@ -317,7 +320,10 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
         logger.warning("Metacritic: could not find page for '%s'", title)
         return result
 
-    return _extract_scores_from_soup(soup, matched_slug, rate_limiter, label=title)
+    return {
+        **_extract_scores_from_soup(soup, matched_slug, rate_limiter, label=title),
+        "url": _MOVIE_URL.format(slug=matched_slug),
+    }
 
 
 def _extract_scores_from_soup(soup, slug: str, rate_limiter=None, label: str = "") -> dict:

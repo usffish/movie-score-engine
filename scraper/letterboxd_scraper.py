@@ -242,7 +242,7 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
 
     if resolver is not None:
         logger.info("Letterboxd: site search failed for '%s', asking Gemini", title)
-        gemini_slug = resolver.resolve_letterboxd_slug(title)
+        gemini_slug = resolver.resolve_letterboxd_slug(title, year)
         if gemini_slug:
             url = _FILM_URL.format(slug=gemini_slug)
             soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
@@ -253,6 +253,7 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
                     "Letterboxd: rejected Gemini slug '%s' for '%s' — it's '%s' (%s)",
                     gemini_slug, title, _parse_title_from_soup(soup), _parse_year_from_soup(soup),
                 )
+                resolver.mark_rejected(title, year, "letterboxd_slug", gemini_slug)
                 soup = None
             if soup is not None:
                 logger.info("Letterboxd: Gemini resolved slug '%s' for '%s'", gemini_slug, title)

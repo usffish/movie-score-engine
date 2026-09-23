@@ -37,6 +37,10 @@ Movies_updated.xlsx
 # Excel lock files (created while a workbook is open)
 ~$*.xlsx
 
+# Gemini answer cache (per-machine, regenerated as needed)
+.gemini_cache.json
+.gemini_cache.json.tmp
+
 # ─── IDE / Editor ────────────────────────────────────────────────────────────
 .vscode/
 .idea/

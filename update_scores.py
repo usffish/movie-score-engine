@@ -72,7 +72,7 @@ from scoring import (
     resolve_year,
 )
 from scraper.http import RateLimiter, titles_match, years_differ
-from scraper.gemini_resolver import GeminiResolver
+from scraper.gemini_resolver import GeminiResolver, ID_KEYS as GEMINI_ID_KEYS
 from scraper.letterboxd_scraper import get_letterboxd_data, get_letterboxd_data_with_slug
 from scraper.metacritic_scraper import get_metacritic_data, get_metacritic_data_with_slug
 from scraper.omdb_client import get_omdb_data, get_omdb_data_with_id
@@ -131,8 +131,9 @@ def fetch_all(
     Two-pass fetch: first run all scrapers, then retry failed ones with Gemini-resolved slugs.
 
     Pass 1: Run all scrapers for all movies (no Gemini).
-    Pass 2: For movies that failed, use Gemini to resolve slugs, then retry only the
-            failed scrapers.  This ensures Gemini only runs once per failed movie.
+    Pass 2: For movies some source couldn't find at all, ask Gemini (told the
+            year) for just those sources' IDs/slugs, verify each answer, and
+            retry only those scrapers.  Gemini runs at most once per movie.
 
     years maps title -> release year (from the optional Year column); a known
     year disambiguates films that share a title.
@@ -144,7 +145,7 @@ def fetch_all(
     years = years or {}
     raw_scores = []
     failed = []
-    failed_for_retry = []
+    failed_for_retry: dict = {}  # title -> Gemini ID keys for sources that didn't find it
 
     for title in tqdm(movies, desc="Fetching scores (pass 1)", unit="movie"):
         year = years.get(title)
@@ -187,32 +188,34 @@ def fetch_all(
             ))
 
             if resolver is not None:
-                omdb_failed = omdb.get("imdb_rating") is None
-                mc_failed = mc.get("review_count", 0) == 0 and metascore is None
-                lb_failed = lb.get("rating") is None
-                if omdb_failed or mc_failed or lb_failed:
-                    failed_for_retry.append(title)
+                # Only ask Gemini about sources that couldn't find the film.
+                # A found page with no score yet (a new release with no IMDB
+                # rating on OMDb, say) isn't something a better ID can fix.
+                not_found = set()
+                if omdb.get("imdb_id") is None:
+                    not_found.add("imdb_id")
+                if mc.get("url") is None:
+                    not_found.add("metacritic_slug")
+                if lb.get("url") is None:
+                    not_found.add("letterboxd_slug")
+                if not_found:
+                    failed_for_retry[title] = not_found
 
         except Exception as exc:
             logger.error("Failed to fetch scores for '%s': %s", title, exc)
             failed.append(title)
             if resolver is not None:
-                failed_for_retry.append(title)
+                failed_for_retry[title] = set(GEMINI_ID_KEYS)
             continue
 
     if failed_for_retry and resolver is not None:
-        logger.info("Retrying %d movie(s) with Gemini slug resolution", len(failed_for_retry))
+        logger.info("Asking Gemini about %d movie(s) not found on every source", len(failed_for_retry))
 
         raw_scores_index = {r.title: i for i, r in enumerate(raw_scores)}
 
-        for title in tqdm(failed_for_retry, desc="Retrying with Gemini", unit="movie"):
-            logger.info("Resolving slugs for: %s", title)
+        for title, not_found in tqdm(list(failed_for_retry.items()),
+                                     desc="Retrying with Gemini", unit="movie"):
             try:
-                gemini_ids = resolver.resolve_all_ids(title)
-                gemini_metacritic_slug = gemini_ids["metacritic_slug"]
-                gemini_letterboxd_slug = gemini_ids["letterboxd_slug"]
-                gemini_imdb_id = gemini_ids["imdb_id"]
-
                 existing_idx = raw_scores_index.get(title)
                 if existing_idx is None:
                     existing_idx = len(raw_scores)
@@ -227,30 +230,42 @@ def fetch_all(
 
                 existing = raw_scores[existing_idx]
                 source_years = dict(existing.source_years)
-                # Year the Gemini match must be close to: the user's, else what
-                # the other sources already agree on (None = title check only).
+                # Year to tell Gemini and to check its answers against: the
+                # user's, else what the other sources agree on (None = unknown).
                 expected_year = resolve_year(years.get(title), source_years)
 
+                gemini_ids = resolver.resolve_all_ids(title, year=expected_year, want=not_found)
+
+                def accept(source: str, key: str, result: dict) -> bool:
+                    if _gemini_match_ok(source, gemini_ids[key], title, expected_year, result):
+                        logger.info("Gemini: using %s '%s' for '%s' — verified '%s' (%s)",
+                                    source, gemini_ids[key], title,
+                                    result.get("title"), result.get("year"))
+                        return True
+                    if result.get("title") is not None:
+                        resolver.mark_rejected(title, expected_year, key, gemini_ids[key])
+                    return False
+
                 imdb_rating = existing.imdb_rating
-                if existing.imdb_rating is None and gemini_imdb_id:
-                    omdb = get_omdb_data_with_id(api_key, gemini_imdb_id, rate_limiter=rate_limiter)
-                    if _gemini_match_ok("OMDb", gemini_imdb_id, title, expected_year, omdb):
+                if gemini_ids["imdb_id"]:
+                    omdb = get_omdb_data_with_id(api_key, gemini_ids["imdb_id"], rate_limiter=rate_limiter)
+                    if accept("OMDb", "imdb_id", omdb):
                         imdb_rating = omdb.get("imdb_rating")
                         source_years["OMDb"] = omdb.get("year")
 
                 metascore = existing.metascore
                 review_count = existing.review_count
-                if existing.metascore is None and existing.review_count == 0 and gemini_metacritic_slug:
-                    mc = get_metacritic_data_with_slug(gemini_metacritic_slug, rate_limiter=rate_limiter)
-                    if _gemini_match_ok("Metacritic", gemini_metacritic_slug, title, expected_year, mc):
-                        metascore = mc.get("metascore")
+                if gemini_ids["metacritic_slug"]:
+                    mc = get_metacritic_data_with_slug(gemini_ids["metacritic_slug"], rate_limiter=rate_limiter)
+                    if accept("Metacritic", "metacritic_slug", mc):
+                        metascore = mc.get("metascore") if mc.get("metascore") is not None else metascore
                         review_count = mc.get("review_count", 0)
                         source_years["Metacritic"] = mc.get("year")
 
                 letterboxd_rating = existing.letterboxd_rating
-                if existing.letterboxd_rating is None and gemini_letterboxd_slug:
-                    lb = get_letterboxd_data_with_slug(gemini_letterboxd_slug, rate_limiter=rate_limiter)
-                    if _gemini_match_ok("Letterboxd", gemini_letterboxd_slug, title, expected_year, lb):
+                if gemini_ids["letterboxd_slug"]:
+                    lb = get_letterboxd_data_with_slug(gemini_ids["letterboxd_slug"], rate_limiter=rate_limiter)
+                    if accept("Letterboxd", "letterboxd_slug", lb):
                         letterboxd_rating = lb.get("rating")
                         source_years["Letterboxd"] = lb.get("year")
 
@@ -301,7 +316,10 @@ def update_workbook(
     resolver = None
     if gemini_key:
         try:
-            resolver = GeminiResolver(api_key=gemini_key)
+            resolver = GeminiResolver(
+                api_key=gemini_key,
+                cache_path=Path(input_path).parent / ".gemini_cache.json",
+            )
             logger.info("Gemini resolver enabled for slug disambiguation")
         except Exception as exc:
             logger.warning("Could not initialise Gemini resolver: %s", exc)

@@ -97,8 +97,8 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
         api_key:  OMDb API key.
         year:     Optional release year to improve match accuracy.
         resolver: Optional GeminiResolver instance.  When OMDb cannot find the
-                  movie by title, the resolver is asked for the IMDb ID and the
-                  lookup is retried using that ID directly.
+                  movie by title or by search, the resolver is asked for the
+                  IMDb ID and the lookup is retried using that ID directly.
 
     Returns:
         dict with keys:
@@ -135,11 +135,22 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
         return dict(_FALLBACK)
 
     if data.get("Response") == "False":
-        logger.warning("OMDb: movie not found for '%s': %s", title, data.get("Error", ""))
+        logger.info("OMDb: no exact title match for '%s' (%s), trying search",
+                    title, data.get("Error", ""))
+
+        # OMDb's search returns real titles with years and IDs — pick one that
+        # matches instead of guessing.
+        imdb_id = _search_imdb_id(title, year, api_key, rate_limiter)
+        if imdb_id:
+            id_data = _fetch(_OMDB_URL, {"i": imdb_id, "apikey": api_key},
+                             rate_limiter=rate_limiter, domain="omdbapi.com")
+            if id_data and id_data.get("Response") != "False":
+                logger.info("OMDb: search matched '%s' to %s", title, imdb_id)
+                return _to_result(id_data, imdb_id)
 
         if resolver is not None:
             logger.info("OMDb: asking Gemini for IMDb ID for '%s'", title)
-            imdb_id = resolver.resolve_imdb_id(title)
+            imdb_id = resolver.resolve_imdb_id(title, year)
             if imdb_id:
                 id_data = _fetch(
                     _OMDB_URL, {"i": imdb_id, "apikey": api_key},
@@ -152,13 +163,50 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
                             "OMDb: rejected Gemini IMDb ID '%s' for '%s' — it's '%s' (%s)",
                             imdb_id, title, found, id_data.get("Year"),
                         )
+                        resolver.mark_rejected(title, year, "imdb_id", imdb_id)
                     else:
                         logger.info("OMDb: Gemini resolved IMDb ID '%s' for '%s'", imdb_id, title)
                         return _to_result(id_data, imdb_id)
 
+        logger.warning("OMDb: movie not found for '%s'", title)
         return dict(_FALLBACK)
 
     return _to_result(data)
+
+
+def _search_imdb_id(title: str, year: Optional[int], api_key: str,
+                    rate_limiter=None) -> Optional[str]:
+    """
+    Find the IMDb ID for *title* with OMDb's search endpoint (?s=).
+
+    Only results whose title matches (ignoring case/punctuation) are kept.
+    With a year, the closest result within YEAR_TOLERANCE wins.  Without one,
+    a single matching result wins; several same-titled films are ambiguous
+    and return None rather than guessing.
+    """
+    data = _fetch(_OMDB_URL, {"s": title, "type": "movie", "apikey": api_key},
+                  rate_limiter=rate_limiter, domain="omdbapi.com")
+    if not data or data.get("Response") == "False":
+        return None
+
+    candidates = [
+        (item.get("imdbID"), _parse_year(item.get("Year")))
+        for item in data.get("Search") or []
+        if item.get("imdbID") and titles_match(item.get("Title"), title)
+    ]
+    if year is not None:
+        close = [(i, y) for i, y in candidates if y is not None and not years_differ(y, year)]
+        if close:
+            return min(close, key=lambda c: abs(c[1] - year))[0]
+        return None
+    if len(candidates) == 1:
+        return candidates[0][0]
+    if candidates:
+        logger.info(
+            "OMDb: search found %d films titled '%s' (%s) — set the Year column to pick one",
+            len(candidates), title, ", ".join(str(y) for _, y in candidates),
+        )
+    return None
 
 
 def get_omdb_data_with_id(api_key: str, imdb_id: Optional[str], rate_limiter=None) -> dict:

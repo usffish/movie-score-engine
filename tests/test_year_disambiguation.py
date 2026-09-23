@@ -112,10 +112,13 @@ class TestMetacriticYear(unittest.TestCase):
             return pages.get(url, _not_found())
         return get
 
-    def _get(self, pages, title, year=None):
+    def _get(self, pages, title, year=None, keep_url=False):
         from scraper.metacritic_scraper import get_metacritic_data
         with patch("scraper.metacritic_scraper.SESSION.get", side_effect=self._fake_get(pages)):
-            return get_metacritic_data(title, year=year)
+            result = get_metacritic_data(title, year=year)
+        if not keep_url:
+            result.pop("url")
+        return result
 
     def test_year_suffixed_page_is_used(self):
         pages = {
@@ -123,6 +126,12 @@ class TestMetacriticYear(unittest.TestCase):
             "https://www.metacritic.com/movie/buddy/": _mc_page("2019-03-20", 76, 4),
         }
         self.assertEqual(self._get(pages, "Buddy", 2026), {"review_count": 22, "metascore": 67, "year": 2026})
+
+    def test_url_reports_matched_page_or_none(self):
+        pages = {"https://www.metacritic.com/movie/buddy-2026/": _mc_page("2026-08-28", 67, 22)}
+        self.assertEqual(self._get(pages, "Buddy", 2026, keep_url=True)["url"],
+                         "https://www.metacritic.com/movie/buddy-2026/")
+        self.assertIsNone(self._get({}, "Buddy", 2026, keep_url=True)["url"])
 
     def test_wrong_year_plain_slug_is_rejected(self):
         pages = {
@@ -159,7 +168,8 @@ class TestFestivalVsReleaseYear(unittest.TestCase):
         pages = {"https://www.metacritic.com/movie/without-blood/": _mc_page("2026-01-30", 41, 10)}
         with patch("scraper.metacritic_scraper.SESSION.get", side_effect=self._fake_get(pages)):
             result = get_metacritic_data("Without Blood", year=2024)
-        self.assertEqual(result, {"review_count": 10, "metascore": 41, "year": 2026})
+        self.assertEqual(result, {"review_count": 10, "metascore": 41, "year": 2026,
+                                  "url": "https://www.metacritic.com/movie/without-blood/"})
 
     def test_letterboxd_accepts_page_two_years_off(self):
         pages = {"https://letterboxd.com/film/without-blood/": _page("Without Blood (2024)", 3.02)}

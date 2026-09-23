@@ -25,8 +25,21 @@ class TestTitlesMatch(unittest.TestCase):
                                      "Oasis: Don't Look Back in Anger"))
         self.assertTrue(titles_match("Coyote vs. ACME", "Coyote vs ACME"))
 
+    def test_separator_spacing_ignored(self):
+        # Live case: the watchlist has no space after the colon.
+        self.assertTrue(titles_match("Fall 2:DeadPoint", "Fall 2: Deadpoint"))
+        self.assertTrue(titles_match("Spider-Man", "Spider Man"))
+
     def test_ampersand_and_article(self):
         self.assertTrue(titles_match("The Fast & the Furious", "Fast and the Furious"))
+
+    def test_prefix_before_colon_is_optional(self):
+        # IMDb drops the "Oasis:" prefix (live answer tt36150957).
+        self.assertTrue(titles_match("Don't Look Back in Anger", "Oasis: Don't Look Back In Anger"))
+        self.assertTrue(titles_match("Shaun the Sheep: The Beast of Mossy Bottom",
+                                     "The Beast of Mossy Bottom"))
+        # The prefix alone is not a match.
+        self.assertFalse(titles_match("Oasis", "Oasis: Don't Look Back In Anger"))
 
     def test_different_titles(self):
         self.assertFalse(titles_match("Without Blood", "The Benza"))
