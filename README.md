@@ -246,7 +246,9 @@ python update_scores.py --gemini-key $GEMINI_API_KEY
 
 Place your watchlist in Movies.xlsx in the project root. The workbook must have a column named **Movies** with one title per row. All other columns are optional — the script adds any missing output columns automatically.
 
-An optional **Year** column (release year) disambiguates films that share a title. When present, the year is sent to OMDb, and Metacritic and Letterboxd try the year-suffixed slug first (e.g. `/movie/buddy-2026/`, `/film/parasite-2019/`) and skip any page whose release year doesn't match. Without it, `Parasite` resolves to the 1982 film on Letterboxd and `Buddy` to the 2019 film on Metacritic.
+An optional **Year** column (release year) disambiguates films that share a title. When present, the year is sent to OMDb, and Metacritic and Letterboxd try the year-suffixed slug first (e.g. `/movie/buddy-2026/`, `/film/parasite-2019/`) and skip any page whose release year is more than 2 years off. Without it, `Parasite` resolves to the 1982 film on Letterboxd and `Buddy` to the 2019 film on Metacritic.
+
+The 2-year tolerance exists because sources date the same film differently — a festival premiere and the theatrical release can be a year or two apart. *Without Blood* is 2024 on IMDb and Letterboxd (premiere) but 2026 on Metacritic (US release); either year works. OMDb only knows a film's first release year, so if a search with your year finds nothing, it retries without the year and accepts a match within 2 years.
 
 Leave Year blank and the script fills it in for you (see **Output columns**) — check it to confirm the right film was found.
 
@@ -256,7 +258,7 @@ Leave Year blank and the script fills it in for you (see **Output columns**) —
 
 | Column | Description |
 |--------|-------------|
-| Year | Release year of the film the scores came from. A year you entered is kept as-is. Otherwise it's filled when Metacritic, Letterboxd and OMDb agree (±1 year); left **blank** when they matched different films — the run log lists what each source found |
+| Year | Release year of the film the scores came from. A year you entered is kept as-is. Otherwise it's filled when Metacritic, Letterboxd and OMDb agree within 2 years (OMDb's year is used); left **blank** when they matched different films — the run log lists what each source found |
 | Metacritic | Metascore (0–100) — Metacritic scrape, falls back to OMDb |
 | st.Metacritic | Min-max normalised Metascore (0.0–1.0) |
 | Reviews | Critic review count from Metacritic |

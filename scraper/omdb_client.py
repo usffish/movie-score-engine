@@ -13,7 +13,7 @@ from typing import Optional
 
 import requests
 
-from scraper.http import retry_get
+from scraper.http import retry_get, years_differ
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,23 @@ def get_omdb_data(title: str, api_key: str, year: Optional[int] = None, resolver
         params["y"] = year
 
     data = _fetch(_OMDB_URL, params, rate_limiter=rate_limiter, domain="omdbapi.com")
+
+    # OMDb only matches a film's first release year, so a theatrical-release
+    # year finds nothing for a film that premiered earlier (Without Blood:
+    # 2026 release, OMDb year 2024).  Retry without the year and accept the
+    # result if it's close enough to be the same film.
+    if data is not None and data.get("Response") == "False" and year is not None:
+        retry = _fetch(_OMDB_URL, {"t": title, "apikey": api_key},
+                       rate_limiter=rate_limiter, domain="omdbapi.com")
+        if retry is not None and retry.get("Response") != "False":
+            found_year = _parse_year(retry.get("Year"))
+            if years_differ(found_year, year):
+                logger.info(
+                    "OMDb: '%s' without a year is from %s, not %s — ignoring",
+                    title, found_year, year,
+                )
+            else:
+                data = retry
 
     if data is None:
         logger.warning("OMDb: all retries exhausted for '%s', returning fallbacks", title)

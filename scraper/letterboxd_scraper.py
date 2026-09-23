@@ -15,7 +15,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from scraper.http import retry_get, slugify as _slugify
+from scraper.http import retry_get, slugify as _slugify, years_differ
 
 logger = logging.getLogger(__name__)
 
@@ -123,12 +123,10 @@ def _parse_year_from_soup(soup: BeautifulSoup) -> Optional[int]:
 
 
 def _year_mismatch(soup: BeautifulSoup, year: Optional[int]) -> bool:
-    """True when a year was requested and the page is clearly for a different year."""
+    """True when a year was requested and the page is clearly for a different film."""
     if not year:
         return False
-    page_year = _parse_year_from_soup(soup)
-    # Allow ±1 for festival-vs-release date differences between sources.
-    return page_year is not None and abs(page_year - year) > 1
+    return years_differ(_parse_year_from_soup(soup), year)
 
 
 def _search_for_slug(title: str, rate_limiter=None) -> Optional[str]:

@@ -20,7 +20,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from scraper.http import retry_get, slugify as _slugify_base
+from scraper.http import retry_get, slugify as _slugify_base, years_differ
 
 logger = logging.getLogger(__name__)
 
@@ -178,12 +178,10 @@ def _extract_release_year(soup: BeautifulSoup) -> Optional[int]:
 
 
 def _year_mismatch(soup: BeautifulSoup, year: Optional[int]) -> bool:
-    """True when a year was requested and the page is clearly for a different year."""
+    """True when a year was requested and the page is clearly for a different film."""
     if not year:
         return False
-    page_year = _extract_release_year(soup)
-    # Allow ±1 for festival-vs-release date differences between sources.
-    return page_year is not None and abs(page_year - year) > 1
+    return years_differ(_extract_release_year(soup), year)
 
 
 def _search_for_slug(title: str, rate_limiter=None) -> Optional[str]:
@@ -229,7 +227,7 @@ def get_metacritic_data(title: str, year: Optional[int] = None, resolver=None,
         title:    Movie title.
         year:     Optional release year.  Year-suffixed slugs (buddy-2026) are
                   tried first, and pages whose release year differs by more
-                  than one are skipped — the plain slug belongs to whichever
+                  than YEAR_TOLERANCE are skipped — the plain slug belongs to whichever
                   film claimed the title first (/movie/buddy/ is 2019's).
         resolver: Optional GeminiResolver instance.  When all local slug
                   candidates and the site search have failed, the resolver is

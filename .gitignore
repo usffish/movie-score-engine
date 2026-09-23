@@ -29,8 +29,13 @@ env/
 ENV/
 .env.local
 
-# ─── Output files ────────────────────────────────────────────────────────────
+# ─── Input / output workbooks ────────────────────────────────────────────────
+Movies.xlsx
 Movies_updated.xlsx
+*_updated.xlsx
+
+# Excel lock files (created while a workbook is open)
+~$*.xlsx
 
 # ─── IDE / Editor ────────────────────────────────────────────────────────────
 .vscode/

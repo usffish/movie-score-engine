@@ -143,6 +143,88 @@ class TestMetacriticYear(unittest.TestCase):
         self.assertEqual(self._get(pages, "Buddy"), {"review_count": 4, "metascore": 76, "year": 2019})
 
 
+class TestFestivalVsReleaseYear(unittest.TestCase):
+    """
+    Without Blood premiered in 2024 (IMDb, Letterboxd) but Metacritic dates
+    it by its 2026 theatrical release.  A 2-year gap is the same film.
+    """
+
+    def _fake_get(self, pages):
+        def get(url, **kwargs):
+            return pages.get(url, _not_found())
+        return get
+
+    def test_metacritic_accepts_page_two_years_off(self):
+        from scraper.metacritic_scraper import get_metacritic_data
+        pages = {"https://www.metacritic.com/movie/without-blood/": _mc_page("2026-01-30", 41, 10)}
+        with patch("scraper.metacritic_scraper.SESSION.get", side_effect=self._fake_get(pages)):
+            result = get_metacritic_data("Without Blood", year=2024)
+        self.assertEqual(result, {"review_count": 10, "metascore": 41, "year": 2026})
+
+    def test_letterboxd_accepts_page_two_years_off(self):
+        pages = {"https://letterboxd.com/film/without-blood/": _page("Without Blood (2024)", 3.02)}
+        with patch("scraper.letterboxd_scraper.SESSION.get", side_effect=self._fake_get(pages)):
+            result = get_letterboxd_data("Without Blood", year=2026)
+        self.assertEqual(result["rating"], 3.02)
+
+    def test_three_years_off_is_still_a_different_film(self):
+        from scraper.metacritic_scraper import get_metacritic_data
+        pages = {"https://www.metacritic.com/movie/without-blood/": _mc_page("2027-01-30", 41, 10)}
+        with patch("scraper.metacritic_scraper.SESSION.get", side_effect=self._fake_get(pages)):
+            result = get_metacritic_data("Without Blood", year=2024)
+        self.assertEqual(result["review_count"], 0)
+
+    def test_resolve_year_accepts_two_year_spread(self):
+        from scoring import resolve_year
+        self.assertEqual(
+            resolve_year(None, {"Metacritic": 2026, "Letterboxd": 2024, "OMDb": 2024}), 2024
+        )
+        self.assertIsNone(
+            resolve_year(None, {"Metacritic": 2026, "Letterboxd": 2022, "OMDb": 2026})
+        )
+
+
+class TestOmdbYearRetry(unittest.TestCase):
+
+    def _omdb(self, data):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = data
+        return resp
+
+    def _fake_get(self, by_year, no_year):
+        def get(url, params=None, **kwargs):
+            if "y" in params:
+                return self._omdb(by_year.get(params["y"], {"Response": "False", "Error": "Movie not found!"}))
+            return self._omdb(no_year)
+        return get
+
+    def test_retries_without_year_and_accepts_close_year(self):
+        from scraper.omdb_client import get_omdb_data
+        film = {"Response": "True", "Year": "2024", "imdbID": "tt18398986",
+                "imdbRating": "6.1", "Metascore": "N/A"}
+        with patch("scraper.omdb_client.SESSION.get", side_effect=self._fake_get({}, film)) as mock_get:
+            result = get_omdb_data("Without Blood", "k", year=2026)
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(result["imdb_id"], "tt18398986")
+        self.assertEqual(result["year"], 2024)
+
+    def test_retry_rejects_a_different_film(self):
+        from scraper.omdb_client import get_omdb_data
+        other = {"Response": "True", "Year": "2019", "imdbID": "tt0000001", "imdbRating": "7.0"}
+        with patch("scraper.omdb_client.SESSION.get", side_effect=self._fake_get({}, other)):
+            result = get_omdb_data("Buddy", "k", year=2026)
+        self.assertIsNone(result["imdb_id"])
+
+    def test_no_retry_when_year_search_succeeds(self):
+        from scraper.omdb_client import get_omdb_data
+        film = {"Response": "True", "Year": "2026", "imdbID": "tt37281055", "imdbRating": "7.1"}
+        with patch("scraper.omdb_client.SESSION.get", side_effect=self._fake_get({2026: film}, {})) as mock_get:
+            result = get_omdb_data("Buddy", "k", year=2026)
+        self.assertEqual(mock_get.call_count, 1)
+        self.assertEqual(result["imdb_id"], "tt37281055")
+
+
 class TestReadYears(unittest.TestCase):
 
     def _sheet(self, rows):

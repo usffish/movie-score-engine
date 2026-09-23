@@ -7,6 +7,8 @@ Data models and scoring math: normalisation and composite calculation.
 from dataclasses import dataclass, field
 from typing import Optional
 
+from scraper.http import YEAR_TOLERANCE
+
 
 @dataclass
 class RawScores:
@@ -19,17 +21,15 @@ class RawScores:
     source_years: dict = field(default_factory=dict)  # {"Metacritic": 2019, ...} as matched
 
 
-# Sources may disagree by a year (festival premiere vs. theatrical release).
-_YEAR_TOLERANCE = 1
-
 
 def resolve_year(given: Optional[int], source_years: dict) -> Optional[int]:
     """
     Decide the release year to record for a movie.
 
     - A year the user supplied always wins.
-    - Otherwise, if every source that reported a year agrees (within ±1),
-      return OMDb's year when present, else the earliest reported.
+    - Otherwise, if every source that reported a year agrees (within
+      YEAR_TOLERANCE — festival premiere vs. theatrical release), return
+      OMDb's year when present, else the earliest reported.
     - If the sources disagree, or none reported a year, return None — the
       scores may come from different films, so the year is unknown.
     """
@@ -38,7 +38,7 @@ def resolve_year(given: Optional[int], source_years: dict) -> Optional[int]:
     found = {src: y for src, y in source_years.items() if y is not None}
     if not found:
         return None
-    if max(found.values()) - min(found.values()) > _YEAR_TOLERANCE:
+    if max(found.values()) - min(found.values()) > YEAR_TOLERANCE:
         return None
     return found.get("OMDb", min(found.values()))
 

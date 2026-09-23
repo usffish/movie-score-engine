@@ -30,6 +30,18 @@ _NETWORK_ERRORS = (
 )
 
 
+# Sources can date the same film differently: a festival premiere and the
+# theatrical release are often 1–2 years apart (Without Blood: IMDb and
+# Letterboxd say 2024, Metacritic 2026).  Years further apart than this are
+# treated as different films.
+YEAR_TOLERANCE = 2
+
+
+def years_differ(a: Optional[int], b: Optional[int]) -> bool:
+    """True when both years are known and too far apart to be the same film."""
+    return a is not None and b is not None and abs(a - b) > YEAR_TOLERANCE
+
+
 def slugify(text: str) -> str:
     """Convert a title to a hyphenated ASCII slug (shared base for all scrapers)."""
     text = unicodedata.normalize("NFKD", text)
