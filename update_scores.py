@@ -37,9 +37,10 @@ import dataclasses
 import logging
 import os
 import random
+import subprocess
 import sys
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -420,8 +421,7 @@ def update_workbook(
     if not movie_rows:
         logger.info("Nothing to update.")
         extend_table_to_stability_cols(ws)
-        wb.save(output_path)
-        return
+        return _save_workbook(wb, output_path)
 
     movies = [t for _, t in movie_rows]
 
@@ -537,13 +537,15 @@ def update_workbook(
 
     extend_table_to_stability_cols(ws)
 
-    wb.save(output_path)
-    logger.info("Saved updated workbook to %s", output_path)
+    saved_path = _save_workbook(wb, output_path)
+    logger.info("Saved updated workbook to %s", saved_path)
 
     if failed:
         logger.warning("Failed to fetch scores for %d movie(s):", len(failed))
         for t in failed:
             logger.warning("  - %s", t)
+
+    return saved_path
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +628,13 @@ def parse_args(argv=None):
         "--no-rate-limit", action="store_true",
         help="Disable adaptive rate limiting (use fixed delay only)"
     )
+    parser.add_argument(
+        "--no-open", action="store_true", dest="no_open",
+        help=(
+            "Don't open the output workbook when the run finishes "
+            "(it opens in your default spreadsheet app otherwise)."
+        )
+    )
     return parser.parse_args(argv)
 
 
@@ -661,6 +670,15 @@ def main(argv=None):
     logger.info("Input:  %s", input_path)
     logger.info("Output: %s", output_path)
 
+    # Excel locks an open workbook on Windows. Fail now rather than after
+    # minutes of fetching and manual entry.
+    if _is_locked(output_path):
+        logger.error(
+            "%s is open in another program (probably Excel). Close it and run again.",
+            output_path,
+        )
+        sys.exit(1)
+
     gemini_key = args.gemini_key or os.environ.get("GEMINI_API_KEY")
     if args.gemini_key:
         logger.warning(
@@ -669,7 +687,7 @@ def main(argv=None):
             "keep it out of shell history and process listings."
         )
 
-    update_workbook(
+    saved_path = update_workbook(
         input_path=input_path,
         output_path=output_path,
         api_key=api_key,
@@ -683,6 +701,68 @@ def main(argv=None):
         random_order=args.random,
         rate_limit=not args.no_rate_limit,
     )
+
+    if not args.no_open:
+        open_in_default_app(saved_path if isinstance(saved_path, Path) else output_path)
+
+
+def _is_locked(path: Path) -> bool:
+    """True when *path* exists but can't be opened for writing (e.g. open in Excel)."""
+    path = Path(path)
+    if not path.exists():
+        return False
+    try:
+        with open(path, "r+b"):
+            return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _save_workbook(wb, output_path: Path) -> Path:
+    """
+    Save *wb* to *output_path*.  If that file is locked (opened in Excel
+    mid-run), save to a timestamped copy next to it instead so nothing
+    fetched or typed in is lost.  Returns the path actually written.
+    """
+    output_path = Path(output_path)
+    try:
+        wb.save(output_path)
+        return output_path
+    except PermissionError:
+        fallback = output_path.with_name(
+            f"{output_path.stem}_{datetime.now():%Y%m%d-%H%M%S}{output_path.suffix}"
+        )
+        wb.save(fallback)
+        logger.error(
+            "%s is open in another program, so results were saved to %s instead. "
+            "Close the original and copy this file over it.",
+            output_path, fallback,
+        )
+        return fallback
+
+
+def open_in_default_app(path: Path) -> None:
+    """
+    Open *path* with the OS default app for .xlsx (Excel, Numbers, …).
+
+    Skipped when the file doesn't exist; any failure (no default app, no
+    desktop session) is logged and never fails the run.
+    """
+    if not Path(path).exists():
+        return
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))  # type: ignore[attr-defined]  # Windows only
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info("Opened %s", path)
+    except Exception as exc:
+        logger.warning("Could not open %s automatically (%s)", path, exc)
 
 
 if __name__ == "__main__":

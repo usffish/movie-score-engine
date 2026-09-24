@@ -23,7 +23,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 4. Checks all three sources matched the **same film** by release year, and records that year in the `Year` column (blank when they disagree)
 5. Normalises all three scores column-wide using min-max scaling
 6. Computes a **review-count-weighted composite score** grounded in Bayesian statistics
-7. Writes results to Movies_updated.xlsx, leaving the original file untouched
+7. Writes results to Movies_updated.xlsx, leaving the original file untouched, and opens it
 
 ---
 
@@ -75,6 +75,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
     ├── test_manual.py                    # Manual prompts: progress counter, Ctrl-C handling
     ├── test_manual_workbook.py           # Blank-only prompts, Manual column, smart-update re-checks, Table1
     ├── test_year_disambiguation.py       # Year matching, auto-fill, and manual year prompts
+    ├── test_open_output.py               # Auto-open, --no-open, locked-output guards
     ├── test_gemini_validation.py         # Gemini IDs/slugs rejected unless title + year match
     └── test_gemini_resolver.py           # Prompt, cache, model fallback, OMDb search, targeted retries
 ```
@@ -231,6 +232,8 @@ python update_scores.py --delay 2.0
 python update_scores.py --gemini-key $GEMINI_API_KEY
 ```
 
+When a run finishes, the output workbook opens in your default spreadsheet app (Excel, Numbers, …). Pass `--no-open` to skip that, e.g. for scheduled runs. Close it before the next run: Excel locks open workbooks on Windows, so the run stops straight away with a message if the output is still open, and if it gets opened mid-run the results are saved to a timestamped copy (`Movies_updated_20260923-191500.xlsx`) instead of being lost.
+
 On Windows, run these with the virtual environment's Python — `.venv\Scripts\python update_scores.py …` — or activate it first. A bare `python` may open the Microsoft Store instead.
 
 **`--smart-update` and the output file:** smart-update decides what to skip from the `StableWeeks`, `LastUpdated` and `Manual` columns of the *input* workbook. Results are written to a separate output file and the input is never changed, so running `--smart-update` on `Movies.xlsx` every time never skips anything. To build up stability history, run each time on the previous output, as in the example above (or copy `Movies_updated.xlsx` over `Movies.xlsx` between runs).
@@ -253,6 +256,7 @@ Movies with a blank score, or a score you typed in (listed in `Manual`), are nev
 | --gemini-key KEY | — | Gemini API key for AI slug resolution (overrides GEMINI_API_KEY env var) |
 | --random | off | Process movies in random order |
 | --no-rate-limit | off | Disable the adaptive per-domain rate limiter (use the fixed `--delay` only) |
+| --no-open | off | Don't open the output workbook when the run finishes |
 
 ---
 
@@ -359,7 +363,8 @@ To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI. To turn it of
 |---------|---------------|
 | `Metacritic: HTTP 403` on every movie, `Reviews` always 0 | Cloudflare is challenging your Python's TLS fingerprint. Make sure `curl_cffi` is installed (`pip install -r requirements.txt`); upgrading to a current Python also helps |
 | A movie's scores look wrong, or its `Year` is blank | The sources matched different films with the same title. Check the run log's `Year: sources matched different films` line, then enter the right release year in the `Year` column (or answer the year prompt in `--manual`) |
-| The run ends with `PermissionError` when saving | The output workbook is open in Excel, which locks it on Windows. Close it and re-run |
+| `… is open in another program (probably Excel)` at the start of a run | The output workbook from the last run is still open (it opens automatically). Close it and run again |
+| Results saved to `Movies_updated_<timestamp>.xlsx` instead | The output was opened in Excel during the run. Close it and copy the timestamped file over `Movies_updated.xlsx` |
 | `GeminiResolver: … API key not valid` | `GEMINI_API_KEY` in `.env` is still the `your_gemini_key_here` placeholder or is wrong. Set a real key, or remove the line to turn Gemini off |
 | A score you typed in is wrong, or you want to be asked again | Delete the cell (and its entry in the `Manual` column) in the workbook you feed back in; the next `--manual` run asks for it |
 | A Gemini answer looks wrong or stale | Delete `.gemini_cache.json` to clear cached answers (they also expire after 30 days) |
