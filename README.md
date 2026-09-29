@@ -167,17 +167,22 @@ Missing scores are dropped from both numerator and denominator, not substituted 
 
 ## Setup
 
-**Requirements:** Python 3.10+ (the `google-genai` library used for the optional Gemini lookup needs 3.10), a free [OMDb API key](https://www.omdbapi.com/apikey.aspx)
+**Requirements:** Python 3.10 or newer (Python 3.9 is end-of-life and is not supported by the optional Gemini dependency), and a free [OMDb API key](https://www.omdbapi.com/apikey.aspx).
 
 ```bash
-# Create and activate a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate        # macOS / Linux
-# .venv\Scripts\Activate.ps1     # Windows PowerShell
+# Check that the selected Python is supported
+python3 --version
+
+# Create and activate a project virtual environment
+python3 -m venv .venv-movie-score
+source .venv-movie-score/bin/activate        # macOS / Linux
+# .venv-movie-score\Scripts\Activate.ps1    # Windows PowerShell
 
 # Install dependencies
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+Use Python 3.10 or newer to create the environment. A virtual environment keeps this project's packages separate from system Python. If `venv` reports `No such file or directory` for a path under `.venv/bin`, an existing `.venv` may contain links to a Python installation that has moved or been removed. Create the environment under a new name, such as `.venv-movie-score`, rather than deleting or overwriting the existing environment.
 
 ### Environment variables
 
