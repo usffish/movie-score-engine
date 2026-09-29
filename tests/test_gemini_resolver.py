@@ -147,8 +147,8 @@ class TestModelFallback(_ResolverTestCase):
 
     MODELS = [m[0] for m in gr._GEMINI_MODELS]
 
-    def test_strongest_model_first(self):
-        self.assertEqual(self.MODELS[0], "gemini-3-flash-preview")
+    def test_low_latency_model_first(self):
+        self.assertEqual(self.MODELS[0], "gemini-3.5-flash-lite")
 
     def test_unavailable_model_skipped_for_rest_of_run(self):
         def answer(model, contents):

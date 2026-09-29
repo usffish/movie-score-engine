@@ -44,13 +44,12 @@ from scraper.http import normalise_title
 
 logger = logging.getLogger(__name__)
 
-# Models in order of preference (strongest first).  When one hits its daily
-# limit, is rate limited, or isn't available to this key, the next is tried.
+# Models in order of preference (lowest latency first).  When one hits its
+# daily limit, is rate limited, or isn't available to this key, the next is tried.
 # Format: (model_name, rpm, rpd)
 _GEMINI_MODELS = [
-    ("gemini-3-flash-preview",        1000,  10_000),  # Tier 1: 1K RPM, 10K RPD
-    ("gemini-3.1-flash-lite-preview", 4000, 150_000),  # Tier 1: 4K RPM, 150K RPD
-    ("gemini-2.5-flash-lite",         4000, 999_999),  # Tier 1: 4K RPM, unlimited RPD
+    ("gemini-3.5-flash-lite", 4000, 150_000),  # Tier 1: 4K RPM, 150K RPD
+    ("gemini-3.5-flash",      1000,  10_000),  # Tier 1: 1K RPM, 10K RPD
 ]
 
 # Identifier keys, one per source.
@@ -59,8 +58,7 @@ ID_KEYS = ("metacritic_slug", "letterboxd_slug", "imdb_id")
 # Cached answers expire so films that had no page yet get re-checked later.
 _CACHE_TTL_SECONDS = 30 * 86400
 
-# Per-request timeout.  Grounded answers from gemini-3-flash-preview took
-# 20–60 s in testing (lite models 1–4 s); a timeout falls back to the next
+# Per-request timeout for grounded lookups.  A timeout falls back to the next
 # model for that prompt.
 _REQUEST_TIMEOUT_MS = 90_000
 
