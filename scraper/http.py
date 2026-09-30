@@ -71,13 +71,32 @@ def titles_match(a: Optional[str], b: Optional[str]) -> bool:
     """
     if not a or not b:
         return False
-    na, nb = normalise_title(a), normalise_title(b)
-    if na == nb:
-        return True
-    for full, other in ((a, nb), (b, na)):
-        if ":" in full and normalise_title(full.rsplit(":", 1)[1]) == other:
-            return True
-    return False
+
+    def forms(text: str) -> set[str]:
+        variants = [text]
+        # Anniversary showings use the same film page as the original movie.
+        base = re.sub(
+            r"\s*(?:[:(\-–—]\s*)?\d+(?:st|nd|rd|th)\s+anniversary"
+            r"(?:\s+edition)?\)?\s*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        if base and base != text:
+            variants.append(base)
+
+        result = set()
+        for variant in variants:
+            normalized = normalise_title(variant)
+            result.add(normalized)
+            # Sources vary on spaces between a word and a number in titles
+            # such as "Crime 101" / "Crime101".
+            result.add(re.sub(r"(?<=\w)\s+(?=\d)|(?<=\d)\s+(?=\w)", "", normalized))
+            if ":" in variant:
+                result.add(normalise_title(variant.rsplit(":", 1)[1]))
+        return result
+
+    return bool(forms(a) & forms(b))
 
 
 def slugify(text: str) -> str:

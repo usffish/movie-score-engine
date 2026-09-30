@@ -240,38 +240,82 @@ def fetch_all(
 
                 gemini_ids = resolver.resolve_all_ids(title, year=expected_year, want=not_found)
 
-                def accept(source: str, key: str, result: dict) -> bool:
-                    if _gemini_match_ok(source, gemini_ids[key], title, expected_year, result):
+                def accept(source: str, key: str, candidate: str, result: dict) -> bool:
+                    if _gemini_match_ok(source, candidate, title, expected_year, result):
                         logger.info("Gemini: using %s '%s' for '%s' — verified '%s' (%s)",
-                                    source, gemini_ids[key], title,
+                                    source, candidate, title,
                                     result.get("title"), result.get("year"))
                         return True
-                    if result.get("title") is not None:
-                        resolver.mark_rejected(title, expected_year, key, gemini_ids[key])
                     return False
 
+                def fetch_verified(source: str, key: str, fetcher):
+                    candidate = gemini_ids.get(key)
+                    if not candidate:
+                        return None
+
+                    result = fetcher(candidate)
+                    if accept(source, key, candidate, result):
+                        return result
+
+                    # Only retry when the source resolved the candidate to a
+                    # different identifiable film. A 404/empty page gives no
+                    # evidence that another identifier would be better.
+                    found_title = result.get("title")
+                    if found_title is None:
+                        return None
+
+                    resolver.mark_rejected(title, expected_year, key, candidate)
+                    retry_method = getattr(resolver, "retry_rejected_id", None)
+                    if not callable(retry_method):
+                        return None
+                    retry_id = retry_method(
+                        title, expected_year, key, candidate,
+                        found_title, result.get("year"),
+                    )
+                    if not isinstance(retry_id, str) or retry_id == candidate:
+                        return None
+
+                    retry_result = fetcher(retry_id)
+                    if accept(source, key, retry_id, retry_result):
+                        return retry_result
+                    if retry_result.get("title") is not None:
+                        resolver.mark_rejected(title, expected_year, key, retry_id)
+                    return None
+
                 imdb_rating = existing.imdb_rating
-                if gemini_ids["imdb_id"]:
-                    omdb = get_omdb_data_with_id(api_key, gemini_ids["imdb_id"], rate_limiter=rate_limiter)
-                    if accept("OMDb", "imdb_id", omdb):
-                        imdb_rating = omdb.get("imdb_rating")
-                        source_years["OMDb"] = omdb.get("year")
+                omdb = fetch_verified(
+                    "OMDb", "imdb_id",
+                    lambda candidate: get_omdb_data_with_id(
+                        api_key, candidate, rate_limiter=rate_limiter,
+                    ),
+                )
+                if omdb is not None:
+                    imdb_rating = omdb.get("imdb_rating")
+                    source_years["OMDb"] = omdb.get("year")
 
                 metascore = existing.metascore
                 review_count = existing.review_count
-                if gemini_ids["metacritic_slug"]:
-                    mc = get_metacritic_data_with_slug(gemini_ids["metacritic_slug"], rate_limiter=rate_limiter)
-                    if accept("Metacritic", "metacritic_slug", mc):
-                        metascore = mc.get("metascore") if mc.get("metascore") is not None else metascore
-                        review_count = mc.get("review_count", 0)
-                        source_years["Metacritic"] = mc.get("year")
+                mc = fetch_verified(
+                    "Metacritic", "metacritic_slug",
+                    lambda candidate: get_metacritic_data_with_slug(
+                        candidate, rate_limiter=rate_limiter,
+                    ),
+                )
+                if mc is not None:
+                    metascore = mc.get("metascore") if mc.get("metascore") is not None else metascore
+                    review_count = mc.get("review_count", 0)
+                    source_years["Metacritic"] = mc.get("year")
 
                 letterboxd_rating = existing.letterboxd_rating
-                if gemini_ids["letterboxd_slug"]:
-                    lb = get_letterboxd_data_with_slug(gemini_ids["letterboxd_slug"], rate_limiter=rate_limiter)
-                    if accept("Letterboxd", "letterboxd_slug", lb):
-                        letterboxd_rating = lb.get("rating")
-                        source_years["Letterboxd"] = lb.get("year")
+                lb = fetch_verified(
+                    "Letterboxd", "letterboxd_slug",
+                    lambda candidate: get_letterboxd_data_with_slug(
+                        candidate, rate_limiter=rate_limiter,
+                    ),
+                )
+                if lb is not None:
+                    letterboxd_rating = lb.get("rating")
+                    source_years["Letterboxd"] = lb.get("year")
 
                 raw_scores[existing_idx] = RawScores(
                     title=title,

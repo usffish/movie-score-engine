@@ -57,6 +57,9 @@ ID_KEYS = ("metacritic_slug", "letterboxd_slug", "imdb_id")
 
 # Cached answers expire so films that had no page yet get re-checked later.
 _CACHE_TTL_SECONDS = 30 * 86400
+# Bump this when model selection, prompt behavior, or cached answer semantics
+# change so old answers do not suppress resolution with the new behavior.
+_CACHE_VERSION = 2
 
 # Per-request timeout for grounded lookups.  A timeout falls back to the next
 # model for that prompt.
@@ -109,19 +112,22 @@ Only give identifiers you have confirmed on the actual site for this specific
 film. Several films can share a title — make sure the one you give is {which}.
 If you cannot confirm one, use null. Never guess.
 
+{feedback_clause}
 Reply with ONLY a JSON object with exactly these keys, and no other text:
 {{{keys}}}
 """
 
 
-def _build_prompt(title: str, year: Optional[int], want: Iterable[str]) -> str:
+def _build_prompt(title: str, year: Optional[int], want: Iterable[str],
+                  feedback: Optional[str] = None) -> str:
     want = list(want)
     year_clause = f" released in {year}" if year else ""
     which = f"the {year} film" if year else "the most notable film with that exact title"
     wanted = "\n".join(f"- {k}: {_ID_DESCRIPTIONS[k]}" for k in want)
     keys = ", ".join(f'"{k}": ...' for k in want)
+    feedback_clause = f"{feedback}\n" if feedback else ""
     return _PROMPT.format(title=title, year_clause=year_clause, wanted=wanted,
-                          which=which, keys=keys)
+                          which=which, keys=keys, feedback_clause=feedback_clause)
 
 
 def _parse_json_reply(text: Optional[str]) -> Optional[dict]:
@@ -144,8 +150,8 @@ def _parse_json_reply(text: Optional[str]) -> Optional[dict]:
 
 class _AnswerCache:
     """
-    JSON file of {"<normalised title>|<year>": {"ts": epoch, "answers": {...},
-    "rejected": {key: [values]}}}.  Missing or corrupt files start empty;
+    JSON file of {"v<version>|<normalised title>|<year>": {"ts": epoch,
+    "answers": {...}, "rejected": {key: [values]}}}.  Missing or corrupt files start empty;
     write failures are logged and ignored (the cache is only an optimisation).
     """
 
@@ -161,7 +167,7 @@ class _AnswerCache:
 
     @staticmethod
     def key(title: str, year: Optional[int]) -> str:
-        return f"{normalise_title(title)}|{year or ''}"
+        return f"v{_CACHE_VERSION}|{normalise_title(title)}|{year or ''}"
 
     def get(self, title: str, year: Optional[int]) -> dict:
         entry = self._data.get(self.key(title, year))
@@ -208,7 +214,7 @@ class GeminiResolver:
     The client is created lazily on first use.
 
     Includes built-in rate limiting and automatic model cycling:
-    - Uses the strongest model first
+    - Uses the low-latency model first
     - Moves to the next model on daily limit, rate limit, or unavailability
     """
 
@@ -397,8 +403,8 @@ class GeminiResolver:
         Ask Gemini for the identifiers in *want* (any of ID_KEYS) in one request.
 
         *year* is included in the prompt so Gemini picks the right film among
-        same-titled ones.  Cached answers are reused; an answer the caller
-        rejected (see mark_rejected) comes back as None without re-asking.
+        same-titled ones. Cached answers are reused; rejected values remain
+        excluded unless retry_rejected_id is explicitly called.
 
         Returns a dict with every key in ID_KEYS; keys not in *want* are None.
         """
@@ -436,6 +442,40 @@ class GeminiResolver:
     def mark_rejected(self, title: str, year: Optional[int], key: str, value: str) -> None:
         """Record that *value* for *key* was checked and is the wrong film, so it isn't reused."""
         self._cache.mark_rejected(title, year, key, value)
+
+    def retry_rejected_id(self, title: str, year: Optional[int], key: str,
+                          rejected_id: str, found_title: str,
+                          found_year: Optional[int]) -> Optional[str]:
+        """Make one targeted correction attempt on the stronger model."""
+        if key not in ID_KEYS or len(self._models) < 2:
+            return None
+
+        feedback = (
+            f"A previous candidate for {key} was {rejected_id!r}. The actual site "
+            f"resolved it to {found_title!r} ({found_year}), which is not the requested "
+            f"film {title!r} ({year}). Search again for this exact film. Do not return "
+            f"the rejected identifier; return a different confirmed identifier or null."
+        )
+        prompt = _build_prompt(title, year, (key,), feedback=feedback)
+
+        previous_model_index = self._model_index
+        self._model_index = len(self._models) - 1
+        try:
+            logger.info("GeminiResolver: retrying %s for '%s' after source mismatch",
+                        key, title)
+            reply = self._ask(prompt)
+        finally:
+            self._model_index = previous_model_index
+
+        data = _parse_json_reply(reply)
+        candidate = _validate_id(key, data.get(key)) if data else None
+        cached = self._cache.get(title, year)
+        rejected = cached.get("rejected", {}).get(key, [])
+        if not candidate or candidate == rejected_id or candidate in rejected:
+            return None
+
+        self._cache.store_answers(title, year, {key: candidate})
+        return candidate
 
     def resolve_metacritic_slug(self, title: str, year: Optional[int] = None) -> Optional[str]:
         """Return the Metacritic slug for *title* (e.g. "dark-knight") or None."""
