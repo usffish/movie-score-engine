@@ -18,7 +18,7 @@ import openpyxl
 import pytest
 
 import update_scores
-from update_scores import _save_workbook, main, open_in_default_app
+from update_scores import _backup_workbook, _save_workbook, main, open_in_default_app
 
 
 @pytest.fixture
@@ -115,3 +115,30 @@ def test_unlocked_file_is_not_reported_locked(tmp_path):
     f.write_bytes(b"x")
     assert update_scores._is_locked(f) is False
     assert update_scores._is_locked(tmp_path / "missing.xlsx") is False
+
+
+def test_save_backs_up_the_file_it_replaces(tmp_path):
+    target = tmp_path / "Movies.xlsx"
+    target.write_bytes(b"old contents")
+    wb = MagicMock()
+    assert _save_workbook(wb, target) == target
+    backups = list((tmp_path / "backups").glob("Movies_*.xlsx"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b"old contents"
+
+
+def test_save_without_existing_file_makes_no_backup(tmp_path):
+    _save_workbook(MagicMock(), tmp_path / "Movies.xlsx")
+    assert not (tmp_path / "backups").exists()
+
+
+def test_backup_keeps_only_newest_copies(tmp_path):
+    target = tmp_path / "Movies.xlsx"
+    target.write_bytes(b"x")
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    for day in range(1, 8):
+        (backup_dir / f"Movies_2026010{day}-000000.xlsx").write_bytes(b"x")
+    newest = _backup_workbook(target, keep=3)
+    kept = sorted(p.name for p in backup_dir.iterdir())
+    assert kept == ["Movies_20260106-000000.xlsx", "Movies_20260107-000000.xlsx", newest.name]

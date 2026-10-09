@@ -4,7 +4,7 @@ Unit tests for update_scores.py orchestrator.
 Covers:
   - parse_args() default values
   - --input defaults to Movies.xlsx
-  - --output defaults to <stem>_updated.xlsx
+  - --output defaults to the input file (updated in place)
   - --limit restricts to first N rows
   - --movie restricts to exact title match
   - --movie with unknown title exits non-zero
@@ -99,13 +99,16 @@ class TestParseArgsDefaults:
         args = parse_args([])
         assert args.api_key is None
 
-    def test_output_stem_derived_from_input(self):
-        """When --output is not given, main() should derive <stem>_updated.xlsx."""
-        args = parse_args(["--input", "my_list.xlsx"])
-        assert args.output is None
-        input_path = Path(args.input)
-        expected = input_path.parent / f"{input_path.stem}_updated{input_path.suffix}"
-        assert expected == Path("my_list_updated.xlsx")
+    def test_output_defaults_to_input(self, tmp_path):
+        """When --output is not given, main() should update the input in place."""
+        input_file = tmp_path / "my_list.xlsx"
+        input_file.touch()
+
+        with patch.dict(os.environ, {"OMDB_API_KEY": "testkey"}, clear=False):
+            with patch("update_scores.update_workbook") as mock_update:
+                main(["--input", str(input_file), "--no-open"])
+
+        assert mock_update.call_args.kwargs["output_path"] == input_file
 
 
 # ---------------------------------------------------------------------------

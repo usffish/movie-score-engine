@@ -3,8 +3,8 @@
 update_scores.py
 ================
 Reads Movies.xlsx, fetches the latest Metacritic / Letterboxd / IMDB scores
-for every movie, recalculates the composite score, and writes the results to
-Movies_updated.xlsx (the original file is never overwritten).
+for every movie, recalculates the composite score, and writes the results
+back to the same file (pass --output to write to a separate file instead).
 
 Usage
 -----
@@ -37,6 +37,7 @@ import dataclasses
 import logging
 import os
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -606,7 +607,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--output", default=None,
-        help="Path for the output Excel file (default: <input_stem>_updated.xlsx)"
+        help="Path for the output Excel file (default: the input file, updated in place)"
     )
     parser.add_argument(
         "--limit", type=int, default=None,
@@ -639,7 +640,8 @@ def parse_args(argv=None):
             "A movie stable for N weeks is skipped for N weeks. "
             "Movies with a blank or hand-typed score are always re-checked, "
             "so a source that adds the film later is picked up. "
-            "Reads the input workbook, so run it on the previous output."
+            "Reads the input workbook, so with a separate --output run it "
+            "on the previous output."
         )
     )
     parser.add_argument(
@@ -707,9 +709,7 @@ def main(argv=None):
         logger.error("Input file not found: %s", input_path)
         sys.exit(1)
 
-    output_path = Path(args.output) if args.output else (
-        input_path.parent / f"{input_path.stem}_updated{input_path.suffix}"
-    )
+    output_path = Path(args.output) if args.output else input_path
 
     logger.info("Input:  %s", input_path)
     logger.info("Output: %s", output_path)
@@ -764,13 +764,48 @@ def _is_locked(path: Path) -> bool:
         return False
 
 
+BACKUP_DIR = "backups"
+BACKUPS_KEPT = 5
+
+
+def _backup_workbook(path: Path, keep: int = BACKUPS_KEPT) -> Optional[Path]:
+    """
+    Copy *path* to backups/<stem>_<timestamp><suffix> next to it before it is
+    overwritten, keeping only the newest *keep* copies.  Returns the backup
+    path, or None when there was nothing to back up or the copy failed.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    backup_dir = path.parent / BACKUP_DIR
+    backup = backup_dir / f"{path.stem}_{datetime.now():%Y%m%d-%H%M%S}{path.suffix}"
+    try:
+        backup_dir.mkdir(exist_ok=True)
+        shutil.copy2(path, backup)
+    except OSError as exc:
+        logger.warning("Could not back up %s before saving: %s", path, exc)
+        return None
+    # Timestamped names sort oldest first.
+    old = sorted(backup_dir.glob(f"{path.stem}_*{path.suffix}"))[:-keep]
+    for stale in old:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    return backup
+
+
 def _save_workbook(wb, output_path: Path) -> Path:
     """
-    Save *wb* to *output_path*.  If that file is locked (opened in Excel
-    mid-run), save to a timestamped copy next to it instead so nothing
-    fetched or typed in is lost.  Returns the path actually written.
+    Save *wb* to *output_path*, backing up the file it replaces first.  If
+    that file is locked (opened in Excel mid-run), save to a timestamped copy
+    next to it instead so nothing fetched or typed in is lost.  Returns the
+    path actually written.
     """
     output_path = Path(output_path)
+    backup = _backup_workbook(output_path)
+    if backup:
+        logger.info("Previous version backed up to %s", backup)
     try:
         wb.save(output_path)
         return output_path

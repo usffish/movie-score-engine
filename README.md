@@ -1,6 +1,6 @@
 # Movie Score Scraper
 
-A Python CLI tool that aggregates film scores from OMDb, Metacritic, and Letterboxd, applies min-max normalisation, and produces a review-count-weighted composite ranking — all written back to Excel without touching the original file.
+A Python CLI tool that aggregates film scores from OMDb, Metacritic, and Letterboxd, applies min-max normalisation, and produces a review-count-weighted composite ranking — all written back to your Excel workbook.
 
 ![Python](https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white)
 ![BeautifulSoup](https://img.shields.io/badge/BeautifulSoup4-3776AB?style=flat-square&logo=python&logoColor=white)
@@ -23,7 +23,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 4. Checks all three sources matched the **same film** by release year, and records that year in the `Year` column (blank when they disagree)
 5. Normalises all three scores column-wide using min-max scaling
 6. Computes a **review-count-weighted composite score** grounded in Bayesian statistics
-7. Writes results to Movies_updated.xlsx, leaving the original file untouched, and opens it
+7. Writes results back to Movies.xlsx and opens it (pass `--output` to write to a separate file instead)
 
 ---
 
@@ -35,9 +35,9 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Resilient scraping** — all HTTP fetches retry up to 3 times with exponential back-off behind a thread-safe per-domain rate limiter. Per-movie failures are logged and skipped; the rest of the batch continues.
 - **Cloudflare-safe Metacritic requests** — Metacritic sits behind Cloudflare, which fingerprints the TLS handshake and serves older Python/OpenSSL builds a 403 "Just a moment…" challenge even with browser headers. Metacritic requests go through [`curl_cffi`](https://github.com/lexiforest/curl_cffi) impersonating Chrome, so it works regardless of the local Python build.
 - **Year disambiguation** — an optional `Year` column steers all three sources to the right film when several share a title (e.g. *Parasite* 2019 vs. 1982). Left blank, it's filled with the year the sources matched, or left blank when they disagree; `--manual` asks for it.
-- **Data safety** — existing cell values are never overwritten by a missing result, and they still count in the composite when a source returns nothing this run. The input workbook is never modified.
+- **Data safety** — existing cell values are never overwritten by a missing result, and they still count in the composite when a source returns nothing this run. The workbook is only saved once, at the end of a run, so an interrupted run leaves it as it was, and the version being replaced is copied to `backups/` first (the last 5 are kept).
 - **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
-- **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks — except movies with a blank or hand-typed score, which are re-checked every run so a source that adds the film later is picked up. (It reads the *input* workbook — see [Usage](#usage) for running it on the previous output.)
+- **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks — except movies with a blank or hand-typed score, which are re-checked every run so a source that adds the film later is picked up. (It reads the *input* workbook — see [Usage](#usage) if you write to a separate `--output`.)
 - **Manual entry that doesn't repeat itself** — `--manual` only asks about scores that are blank in the workbook, so anything you've typed in (or that was scraped before) is never asked again. Typed scores are tagged in a `Manual` column and replaced automatically once a source has the film. Ctrl-C stops the prompting without discarding anything already entered.
 - **AI-powered slug resolution** — optional Gemini integration looks up hard-to-find movie pages with Google Search as a last resort, only for sources that couldn't find the film at all, and never asks the AI for scores. Every answer is verified (title + year) before use, and answers are cached between runs.
 
@@ -53,8 +53,8 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 ├── manual.py                 # Interactive prompts for unknown years and missing scores
 ├── requirements.txt
 ├── .env.example              # Template for .env (API keys)
-├── Movies.xlsx               # Input watchlist (user-provided, not committed)
-├── Movies_updated.xlsx       # Generated output (not committed)
+├── Movies.xlsx               # Watchlist, updated in place (user-provided, not committed)
+├── backups/                  # Last 5 versions of the workbook (generated, not committed)
 ├── .gemini_cache.json        # Cached Gemini answers (generated, not committed)
 ├── scraper/
 │   ├── http.py               # Shared HTTP retry util, RateLimiter, slugify(), title/year matching
@@ -75,7 +75,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
     ├── test_manual.py                    # Manual prompts: progress counter, Ctrl-C handling
     ├── test_manual_workbook.py           # Blank-only prompts, Manual column, smart-update re-checks, Table1
     ├── test_year_disambiguation.py       # Year matching, auto-fill, and manual year prompts
-    ├── test_open_output.py               # Auto-open, --no-open, locked-output guards
+    ├── test_open_output.py               # Auto-open, --no-open, locked-output guards, backups
     ├── test_gemini_validation.py         # Gemini IDs/slugs rejected unless title + year match
     └── test_gemini_resolver.py           # Prompt, cache, model fallback, OMDb search, targeted retries
 ```
@@ -225,7 +225,10 @@ python update_scores.py --random
 python update_scores.py --input my_list.xlsx
 
 # Skip recently-stable movies (see note below)
-python update_scores.py --input Movies_updated.xlsx --output Movies_updated.xlsx --smart-update
+python update_scores.py --smart-update
+
+# Write to a separate file instead of updating Movies.xlsx in place
+python update_scores.py --output Movies_updated.xlsx
 
 # Ask for unknown release years and missing values
 python update_scores.py --manual
@@ -237,11 +240,11 @@ python update_scores.py --delay 2.0
 python update_scores.py --gemini-key $GEMINI_API_KEY
 ```
 
-When a run finishes, the output workbook opens in your default spreadsheet app (Excel, Numbers, …). Pass `--no-open` to skip that, e.g. for scheduled runs. Close it before the next run: Excel locks open workbooks on Windows, so the run stops straight away with a message if the output is still open, and if it gets opened mid-run the results are saved to a timestamped copy (`Movies_updated_20260923-191500.xlsx`) instead of being lost.
+When a run finishes, the output workbook opens in your default spreadsheet app (Excel, Numbers, …). Pass `--no-open` to skip that, e.g. for scheduled runs. Close it before the next run: Excel locks open workbooks on Windows, so the run stops straight away with a message if the workbook is still open, and if it gets opened mid-run the results are saved to a timestamped copy (`Movies_20260923-191500.xlsx`) instead of being lost.
 
 On Windows, run these with the virtual environment's Python — `.venv\Scripts\python update_scores.py …` — or activate it first. A bare `python` may open the Microsoft Store instead.
 
-**`--smart-update` and the output file:** smart-update decides what to skip from the `StableWeeks`, `LastUpdated` and `Manual` columns of the *input* workbook. Results are written to a separate output file and the input is never changed, so running `--smart-update` on `Movies.xlsx` every time never skips anything. To build up stability history, run each time on the previous output, as in the example above (or copy `Movies_updated.xlsx` over `Movies.xlsx` between runs).
+**`--smart-update` and the output file:** smart-update decides what to skip from the `StableWeeks`, `LastUpdated` and `Manual` columns of the *input* workbook. By default results are written back to the input, so stability history builds up on its own. If you pass a separate `--output`, the input is never changed and `--smart-update` never skips anything — run each time on the previous output instead (`--input Movies_updated.xlsx --output Movies_updated.xlsx`).
 
 Movies with a blank score, or a score you typed in (listed in `Manual`), are never skipped: they're re-checked every run, so when Metacritic, Letterboxd or OMDb adds the film later, the real score is picked up. Re-checking is silent — with `--manual` you're still only asked about cells that are blank.
 
@@ -250,7 +253,7 @@ Movies with a blank score, or a score you typed in (listed in `Manual`), are nev
 | Flag | Default | Description |
 |------|---------|-------------|
 | --input PATH | Movies.xlsx | Path to the input workbook |
-| --output PATH | \<stem\>_updated.xlsx | Path for the output workbook |
+| --output PATH | same as --input | Path for the output workbook (default: update the input in place) |
 | --api-key KEY | — | OMDb API key (overrides OMDB_API_KEY env var) |
 | --limit N | — | Pick N movies at random |
 | --movie TITLE | — | Process a single movie by exact title |
@@ -267,7 +270,9 @@ Movies with a blank score, or a score you typed in (listed in `Manual`), are nev
 
 ## Input format
 
-Place your watchlist in Movies.xlsx in the project root. The workbook must have a column named **Movies** with one title per row. All other columns are optional — the script adds any missing output columns automatically. The input is never modified unless you point `--output` at it.
+Place your watchlist in Movies.xlsx in the project root. The workbook must have a column named **Movies** with one title per row. All other columns are optional — the script adds any missing output columns automatically. The script updates this file in place; pass `--output` to write the results to a separate file and leave it untouched.
+
+Before each save, the version about to be replaced is copied to `backups/Movies_<timestamp>.xlsx`, and the 5 most recent copies are kept. To undo a bad run, close the workbook and copy the latest backup over `Movies.xlsx`.
 
 An optional **Year** column (release year) disambiguates films that share a title. When present, the year is sent to OMDb, and Metacritic and Letterboxd try the year-suffixed slug first (e.g. `/movie/buddy-2026/`, `/film/parasite-2019/`) and skip any page whose release year is more than 2 years off. Without it, `Parasite` resolves to the 1982 film on Letterboxd and `Buddy` to the 2019 film on Metacritic.
 
@@ -369,7 +374,8 @@ To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI. To turn it of
 | `Metacritic: HTTP 403` on every movie, `Reviews` always 0 | Cloudflare is challenging your Python's TLS fingerprint. Make sure `curl_cffi` is installed (`pip install -r requirements.txt`); upgrading to a current Python also helps |
 | A movie's scores look wrong, or its `Year` is blank | The sources matched different films with the same title. Check the run log's `Year: sources matched different films` line, then enter the right release year in the `Year` column (or answer the year prompt in `--manual`) |
 | `… is open in another program (probably Excel)` at the start of a run | The output workbook from the last run is still open (it opens automatically). Close it and run again |
-| Results saved to `Movies_updated_<timestamp>.xlsx` instead | The output was opened in Excel during the run. Close it and copy the timestamped file over `Movies_updated.xlsx` |
+| A run left bad scores in `Movies.xlsx` | Close the workbook and copy the newest file in `backups/` over `Movies.xlsx` — it's the version from just before that run |
+| Results saved to `Movies_<timestamp>.xlsx` instead | The workbook was opened in Excel during the run. Close it and copy the timestamped file over `Movies.xlsx` |
 | `GeminiResolver: … API key not valid` | `GEMINI_API_KEY` in `.env` is still the `your_gemini_key_here` placeholder or is wrong. Set a real key, or remove the line to turn Gemini off |
 | A score you typed in is wrong, or you want to be asked again | Delete the cell (and its entry in the `Manual` column) in the workbook you feed back in; the next `--manual` run asks for it |
 | A Gemini answer looks wrong or stale | Delete `.gemini_cache.json` to clear cached answers (they also expire after 30 days) |

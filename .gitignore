@@ -33,6 +33,7 @@ ENV/
 Movies.xlsx
 Movies_updated.xlsx
 *_updated.xlsx
+backups/
 
 # Excel lock files (created while a workbook is open)
 ~$*.xlsx
