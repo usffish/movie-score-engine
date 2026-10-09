@@ -507,8 +507,46 @@ def update_workbook(
     raw_scores = [_fill_from_existing(r, existing_scores.get(r.title)) for r in raw_scores]
     before_manual = {r.title: r for r in raw_scores}
 
+    def retitle(old_title: str, new_title: str) -> Optional[RawScores]:
+        """
+        Fix a typo'd title from the manual prompt: rename the workbook row and
+        everything tracked under the old title, then fetch the movie again.
+        """
+        taken = {
+            str(c.value).strip()
+            for (c,) in ws.iter_rows(min_row=2, min_col=title_col, max_col=title_col)
+            if c.value is not None
+        }
+        if new_title in taken:
+            raise ValueError(f"'{new_title}' is already in the workbook.")
+
+        index = next(i for i, (_, t) in enumerate(movie_rows) if t == old_title)
+        ws_row = movie_rows[index][0]
+        ws.cell(row=ws_row, column=title_col, value=new_title)
+        movie_rows[index] = (ws_row, new_title)
+        existing_scores[new_title] = dataclasses.replace(
+            existing_scores.pop(old_title), title=new_title
+        )
+        if old_title in years:
+            years[new_title] = years.pop(old_title)
+        scraped_by_title.pop(old_title, None)
+        before_manual.pop(old_title, None)
+        logger.info("Renamed '%s' to '%s'; fetching it again", old_title, new_title)
+
+        refetched, _ = fetch_all(
+            [new_title], api_key=api_key, delay=delay, verbose=verbose,
+            resolver=resolver, rate_limiter=rate_limiter, years=years,
+        )
+        if not refetched:
+            return None
+        scraped_by_title[new_title] = _scraped_fields(refetched[0])
+        filled = _fill_from_existing(refetched[0], existing_scores[new_title])
+        before_manual[new_title] = filled
+        return filled
+
     raw_scores, failed, manual_unchanged = apply_manual_entry(
-        raw_scores, failed, manual=prompt_scores, existing=existing_scores
+        raw_scores, failed, manual=prompt_scores, existing=existing_scores,
+        retitle=retitle,
     )
     year_by_title = {r.title: r.year for r in raw_scores}
 
@@ -650,6 +688,8 @@ def parse_args(argv=None):
             "Prompt for unknown release years, then for scores that are blank in "
             "the workbook and couldn't be fetched. Fields already filled (typed "
             "in or scraped on an earlier run) aren't asked again. "
+            "At a prompt, b goes back a field and t fixes the movie's title; "
+            "typed scores are listed for review before saving. "
             "Ctrl-C stops the prompting and saves everything entered so far."
         )
     )

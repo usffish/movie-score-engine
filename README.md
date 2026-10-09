@@ -39,6 +39,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
 - **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks — except movies with a blank or hand-typed score, which are re-checked every run so a source that adds the film later is picked up. (It reads the *input* workbook — see [Usage](#usage) if you write to a separate `--output`.)
 - **Manual entry that doesn't repeat itself** — `--manual` only asks about scores that are blank in the workbook, so anything you've typed in (or that was scraped before) is never asked again. Typed scores are tagged in a `Manual` column and replaced automatically once a source has the film. Ctrl-C stops the prompting without discarding anything already entered.
+- **Correctable prompts** — at a `--manual` prompt, `b` goes back a field and `t` fixes a typo'd title (the row is renamed and re-fetched). Everything typed is listed for review before it's saved, with the option to redo a movie or discard the lot.
 - **AI-powered slug resolution** — optional Gemini integration looks up hard-to-find movie pages with Google Search as a last resort, only for sources that couldn't find the film at all, and never asks the AI for scores. Every answer is verified (title + year) before use, and answers are cached between runs.
 
 ---
@@ -50,7 +51,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 ├── update_scores.py          # Thin orchestrator: fetch_all, update_workbook, CLI
 ├── scoring.py                # Data models (RawScores, NormalisedScores), scoring math, year resolution
 ├── excel.py                  # Workbook I/O, header management, Year column, stability tracking
-├── manual.py                 # Interactive prompts for unknown years and missing scores
+├── manual.py                 # Interactive prompts for unknown years and missing scores, review before saving
 ├── requirements.txt
 ├── .env.example              # Template for .env (API keys)
 ├── Movies.xlsx               # Watchlist, updated in place (user-provided, not committed)
@@ -72,8 +73,8 @@ For every title in a personal Movies.xlsx watchlist, the tool:
     ├── test_composite_properties.py      # Property: formula correctness + safety
     ├── test_scraper_properties.py        # Property: review count, rating range, back-off
     ├── test_orchestrator_properties.py   # Property: input unchanged, output columns
-    ├── test_manual.py                    # Manual prompts: progress counter, Ctrl-C handling
-    ├── test_manual_workbook.py           # Blank-only prompts, Manual column, smart-update re-checks, Table1
+    ├── test_manual.py                    # Manual prompts: progress counter, Ctrl-C handling, back, title fix, review
+    ├── test_manual_workbook.py           # Blank-only prompts, Manual column, smart-update re-checks, Table1, title fix
     ├── test_year_disambiguation.py       # Year matching, auto-fill, and manual year prompts
     ├── test_open_output.py               # Auto-open, --no-open, locked-output guards, backups
     ├── test_gemini_validation.py         # Gemini IDs/slugs rejected unless title + year match
@@ -260,7 +261,7 @@ Movies with a blank score, or a score you typed in (listed in `Manual`), are nev
 | --delay SECS | 1.0 | Seconds between requests to each source |
 | --verbose | off | Enable debug-level logging |
 | --smart-update | off | Skip recently-stable movies |
-| --manual | off | Prompt for unknown release years, then for scores blank in the workbook (Ctrl-C saves and stops) |
+| --manual | off | Prompt for unknown release years, then for scores blank in the workbook (`b` goes back, `t` fixes the title, Ctrl-C saves and stops) |
 | --gemini-key KEY | — | Gemini API key for AI slug resolution (overrides GEMINI_API_KEY env var) |
 | --random | off | Process movies in random order |
 | --no-rate-limit | off | Disable the adaptive per-domain rate limiter (use the fixed `--delay` only) |
@@ -319,7 +320,7 @@ It then prompts for scores that are **blank in the workbook** and couldn't be fe
 
 ```
   ── Manual entry for: Nirvana the Band the Show the Movie ── [3/12 · 9 left]
-  (Press Enter to skip a field and leave it unchanged, Ctrl-C to stop and save)
+  (Enter skips a field · b goes back · t fixes the title · Ctrl-C stops and saves)
 
   Metascore (0-100): 74
   IMDB rating (0.0-10.0):
@@ -334,6 +335,24 @@ It then prompts for scores that are **blank in the workbook** and couldn't be fe
 The count covers movies with at least one blank score plus failed movies with blanks — complete movies are never prompted for.
 
 Press Enter to skip a field; the cell stays blank and you'll be asked again next run. **Ctrl-C (or end of input) stops the prompting without losing work** — every entry already made is written to the output workbook, including the fields typed for the movie you were on when you interrupted.
+
+### Fixing mistakes
+
+- **Wrong number — type `b`** at the next prompt to go back a field and retype it. It works repeatedly, back to the movie's first field.
+- **Typo in the title — type `t`**, then the correct title. The row is renamed in the workbook and the movie is fetched again under the new name; you're then asked only for whatever is still missing, which is often nothing. A title that's already in the workbook is refused. Anything typed for the movie before `t` is dropped.
+- **Review before saving.** After the last movie, everything you typed is listed:
+
+  ```
+    ── Review: typed scores for 2 movie(s) ──
+      1. Nirvana the Band the Show the Movie: Metascore 74 · Reviews 12
+      2. Buddy: IMDB 6.5
+
+    Enter to save, a number to redo that movie, d to discard typed scores:
+  ```
+
+  A number re-asks that movie from scratch. `d` drops every score typed this run; fetched scores and corrected titles are still saved. The review is skipped when nothing was typed, and after Ctrl-C, which saves straight away.
+
+To fix a typed score after it has been saved, type over the cell in the workbook, or delete it (and its entry in `Manual`) to be asked again.
 
 ---
 
@@ -377,7 +396,8 @@ To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI. To turn it of
 | A run left bad scores in `Movies.xlsx` | Close the workbook and copy the newest file in `backups/` over `Movies.xlsx` — it's the version from just before that run |
 | Results saved to `Movies_<timestamp>.xlsx` instead | The workbook was opened in Excel during the run. Close it and copy the timestamped file over `Movies.xlsx` |
 | `GeminiResolver: … API key not valid` | `GEMINI_API_KEY` in `.env` is still the `your_gemini_key_here` placeholder or is wrong. Set a real key, or remove the line to turn Gemini off |
-| A score you typed in is wrong, or you want to be asked again | Delete the cell (and its entry in the `Manual` column) in the workbook you feed back in; the next `--manual` run asks for it |
+| A movie's title has a typo | Type `t` at one of its `--manual` score prompts and enter the correct title, or fix the cell in the workbook and run again |
+| A score you typed in is wrong, or you want to be asked again | During the run, type `b` to go back a field, or redo the movie from the review list. After it's saved: delete the cell (and its entry in the `Manual` column) in the workbook you feed back in; the next `--manual` run asks for it |
 | A Gemini answer looks wrong or stale | Delete `.gemini_cache.json` to clear cached answers (they also expire after 30 days) |
 | IMDB rating differs slightly from imdb.com | OMDb's copy of IMDb ratings lags a few days, most noticeably for new releases still gaining votes. The film is right; the number catches up |
 

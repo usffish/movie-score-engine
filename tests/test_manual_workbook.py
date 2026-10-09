@@ -223,7 +223,9 @@ class TestManualAcrossRuns(unittest.TestCase):
 
     def test_workflow(self):
         prompts, cell = self._run(imdb_alpha=None, inputs=["7.0"])
-        self.assertEqual(prompts, ["IMDB rating (0.0-10.0):"])
+        self.assertEqual(prompts[0], "IMDB rating (0.0-10.0):")
+        self.assertEqual(len(prompts), 2)        # the score, then the review
+        self.assertTrue(prompts[1].startswith("Enter to save"))
         self.assertEqual(cell("IMDB"), 7.0)
         self.assertEqual(cell("Manual"), "IMDB")
         self.assertIsNotNone(cell("st.IMDB"))  # typed score counts in the composite
@@ -237,6 +239,45 @@ class TestManualAcrossRuns(unittest.TestCase):
         self.assertEqual(prompts, [])
         self.assertEqual(cell("IMDB"), 7.4)      # real score replaces the typed one
         self.assertIsNone(cell("Manual"))
+
+
+class TestTitleFix(unittest.TestCase):
+    """Typing "t" at a prompt renames the row and fetches under the new title."""
+
+    def test_fixed_title_is_renamed_and_scored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book = Path(tmp) / "Movies.xlsx"
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(["Movies", "Year"])
+            ws.append(["Alpah", None])
+            ws.append(["Beta", 2026])
+            wb.save(book)
+
+            from update_scores import update_workbook
+
+            def fetch_all(movies, api_key, delay=0.0, verbose=False, resolver=None,
+                          rate_limiter=None, years=None):
+                data = {
+                    "Alpha": scores("Alpha", 70, None, 20, 3.5, year=2026),
+                    "Beta": scores("Beta", 80, 8.0, 30, 4.0, year=2026),
+                }
+                return [data[m] for m in movies if m in data], [m for m in movies if m not in data]
+
+            inputs = ["t", "Beta", "t", "Alpha", "7.0", ""]
+            with patch("update_scores.fetch_all", side_effect=fetch_all), \
+                 patch("builtins.input", side_effect=inputs), \
+                 patch("builtins.print"):
+                update_workbook(book, book, api_key="k", delay=0.0, manual=True)
+
+            ws = openpyxl.load_workbook(book).active
+            hm = get_header_map(ws)
+            titles = [ws.cell(r, hm["Movies"]).value for r in range(2, ws.max_row + 1)]
+            self.assertEqual(titles, ["Alpha", "Beta"])   # "Beta" was refused as a duplicate
+            self.assertEqual(ws.cell(2, hm["Metacritic"]).value, 70)
+            self.assertEqual(ws.cell(2, hm["IMDB"]).value, 7.0)
+            self.assertEqual(ws.cell(2, hm["Manual"]).value, "IMDB")
+            self.assertEqual(ws.cell(2, hm["Year"]).value, 2026)
 
 
 if __name__ == "__main__":

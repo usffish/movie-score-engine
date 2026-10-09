@@ -25,47 +25,65 @@ class ManualEntryInterrupted(Exception):
         self.partial = partial
 
 
-def _prompt_value(prompt: str, parser, label: str):
+class TitleCorrection(Exception):
+    """Raised when the user asks to fix the title of the movie being prompted."""
+
+    def __init__(self, new_title: str):
+        super().__init__(f"Title corrected to {new_title!r}")
+        self.new_title = new_title
+
+
+# Returned by a prompt when the user typed a command instead of a value.
+BACK = object()
+RETITLE = object()
+
+
+def _prompt_value(prompt: str, parser, label: str, commands: Optional[dict] = None):
     """
     Prompt the user for a value, parse it with *parser*, and return the result.
 
     Returns None if the user presses Enter without typing anything (skip).
     Loops until a valid value is entered or the user skips.
+    *commands* maps a typed word (e.g. "b") to a sentinel returned as-is.
     End of input (no terminal attached, or Ctrl-Z/Ctrl-D) is treated like
     Ctrl-C, so callers stop prompting and keep what was entered.
     """
     while True:
         try:
             # Windows PowerShell prefixes piped stdin with a BOM.
-            raw = input(prompt).lstrip("﻿").strip()
+            raw = input(prompt).lstrip("\ufeff").strip()
         except EOFError:
             raise KeyboardInterrupt from None
         if raw == "":
             return None
+        if commands and raw.lower() in commands:
+            return commands[raw.lower()]
         try:
             return parser(raw)
         except (ValueError, TypeError):
             print(f"  Invalid {label}. Press Enter to skip, or try again.")
 
 
-def _prompt_int_in_range(prompt: str, lo: int, hi: int, label: str) -> Optional[int]:
+def _prompt_int_in_range(prompt: str, lo: int, hi: int, label: str,
+                         commands: Optional[dict] = None) -> Optional[int]:
     """Prompt for an integer in [lo, hi], returning None on empty input."""
     def parse(s):
         v = int(s)
         if not (lo <= v <= hi):
             raise ValueError(f"{v} not in [{lo}, {hi}]")
         return v
-    return _prompt_value(prompt, parse, label)
+    return _prompt_value(prompt, parse, label, commands)
 
 
-def _prompt_float_in_range(prompt: str, lo: float, hi: float, label: str) -> Optional[float]:
+def _prompt_float_in_range(prompt: str, lo: float, hi: float, label: str,
+                           commands: Optional[dict] = None) -> Optional[float]:
     """Prompt for a float in [lo, hi], returning None on empty input."""
     def parse(s):
         v = float(s)
         if not (lo <= v <= hi):
             raise ValueError(f"{v} not in [{lo}, {hi}]")
         return v
-    return _prompt_value(prompt, parse, label)
+    return _prompt_value(prompt, parse, label, commands)
 
 
 def _progress_label(position: Optional[int], total: Optional[int]) -> str:
@@ -75,10 +93,89 @@ def _progress_label(position: Optional[int], total: Optional[int]) -> str:
     return f" [{position}/{total} · {total - position} left]"
 
 
+def _hint(allow_retitle: bool) -> str:
+    """The one-line key reminder printed above a movie's prompts."""
+    keys = ["Enter skips a field", "b goes back"]
+    if allow_retitle:
+        keys.append("t fixes the title")
+    keys.append("Ctrl-C stops and saves")
+    return f"  ({' · '.join(keys)})\n"
+
+
+# Score fields in the order they're asked: (RawScores field, label, prompt).
+_SCORE_PROMPTS = (
+    ("metascore", "Metascore",
+     lambda cmds: _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore", cmds)),
+    ("imdb_rating", "IMDB",
+     lambda cmds: _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating", cmds)),
+    ("review_count", "Reviews",
+     lambda cmds: _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count", cmds)),
+    ("letterboxd_rating", "Letterboxd",
+     lambda cmds: _prompt_float_in_range("  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating", cmds)),
+)
+
+
+def _prompt_fields(start: RawScores, allow_retitle: bool = False) -> RawScores:
+    """
+    Ask for each score that is blank on *start* and return a copy with the
+    answers merged in.  The critic review count is only asked for alongside a
+    Metascore typed in now — without a Metacritic page there's no count to know.
+
+    Typing "b" returns to the previous field; "t" (when *allow_retitle*) asks
+    for a corrected title and raises TitleCorrection.  Ctrl-C raises
+    ManualEntryInterrupted carrying the fields entered so far.
+    """
+    commands = {"b": BACK}
+    if allow_retitle:
+        commands["t"] = RETITLE
+
+    entered: dict = {}
+    asked: list = []   # indexes of the fields answered so far, for "b"
+
+    def wanted(field: str) -> bool:
+        if field == "review_count":
+            return start.review_count == 0 and entered.get("metascore") is not None
+        return getattr(start, field) is None
+
+    def snapshot() -> RawScores:
+        return dataclasses.replace(
+            start, **{f: v for f, v in entered.items() if v is not None}
+        )
+
+    i = 0
+    try:
+        while i < len(_SCORE_PROMPTS):
+            field, _, ask = _SCORE_PROMPTS[i]
+            if not wanted(field):
+                i += 1
+                continue
+            value = ask(commands)
+            if value is BACK:
+                if not asked:
+                    print("  Already at the first field.")
+                    continue
+                i = asked.pop()
+                entered.pop(_SCORE_PROMPTS[i][0], None)
+                continue
+            if value is RETITLE:
+                new_title = _prompt_value("  Correct title (Enter to cancel): ", str, "title")
+                if new_title and new_title != start.title:
+                    raise TitleCorrection(new_title)
+                continue
+            entered[field] = value
+            asked.append(i)
+            i += 1
+    except KeyboardInterrupt:
+        raise ManualEntryInterrupted(snapshot()) from None
+
+    return snapshot()
+
+
 def prompt_missing_scores(
     raw: RawScores,
     position: Optional[int] = None,
     total: Optional[int] = None,
+    allow_retitle: bool = False,
 ) -> RawScores:
     """
     Interactively prompt the user to fill in the blank fields on *raw*.
@@ -91,44 +188,8 @@ def prompt_missing_scores(
     Returns a new RawScores with user-supplied values merged in.
     """
     print(f"\n  ── Manual entry for: {raw.title} ──{_progress_label(position, total)}")
-    print("  (Press Enter to skip a field and leave it unchanged, Ctrl-C to stop and save)\n")
-
-    metascore = raw.metascore
-    imdb_rating = raw.imdb_rating
-    review_count = raw.review_count
-    letterboxd_rating = raw.letterboxd_rating
-    metascore_entered = False
-
-    def snapshot() -> RawScores:
-        return dataclasses.replace(
-            raw,
-            metascore=metascore,
-            imdb_rating=imdb_rating,
-            review_count=review_count,
-            letterboxd_rating=letterboxd_rating,
-        )
-
-    try:
-        if metascore is None:
-            metascore = _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore")
-            metascore_entered = metascore is not None
-
-        if imdb_rating is None:
-            imdb_rating = _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating")
-
-        if review_count == 0 and metascore_entered:
-            rc = _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count")
-            if rc is not None:
-                review_count = rc
-
-        if letterboxd_rating is None:
-            letterboxd_rating = _prompt_float_in_range(
-                "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
-            )
-    except KeyboardInterrupt:
-        raise ManualEntryInterrupted(snapshot()) from None
-
-    return snapshot()
+    print(_hint(allow_retitle))
+    return _prompt_fields(raw, allow_retitle)
 
 
 def has_blank_scores(raw: Optional[RawScores]) -> bool:
@@ -143,6 +204,7 @@ def prompt_failed_movie(
     position: Optional[int] = None,
     total: Optional[int] = None,
     existing: Optional[RawScores] = None,
+    allow_retitle: bool = False,
 ) -> Optional[RawScores]:
     """
     Interactively prompt the user for the scores of a movie that failed
@@ -156,47 +218,18 @@ def prompt_failed_movie(
     at least one value, or None if nothing new was entered.
     """
     print(f"\n  ── Manual entry for failed movie: {title} ──{_progress_label(position, total)}")
-    print("  (Press Enter to skip a field, Ctrl-C to stop and save)\n")
+    print(_hint(allow_retitle))
 
-    start = existing or RawScores(title, None, None, 0, None)
-    metascore = start.metascore
-    imdb_rating = start.imdb_rating
-    review_count = start.review_count
-    letterboxd_rating = start.letterboxd_rating
-
-    def snapshot() -> Optional[RawScores]:
-        current = (metascore, imdb_rating, review_count, letterboxd_rating)
-        if current == (start.metascore, start.imdb_rating, start.review_count, start.letterboxd_rating):
-            return None
-        return dataclasses.replace(
-            start,
-            title=title,
-            metascore=metascore,
-            imdb_rating=imdb_rating,
-            review_count=review_count,
-            letterboxd_rating=letterboxd_rating,
-        )
+    start = dataclasses.replace(existing or RawScores(title, None, None, 0, None), title=title)
 
     try:
-        metascore_entered = False
-        if metascore is None:
-            metascore = _prompt_int_in_range("  Metascore (0-100): ", 0, 100, "Metascore")
-            metascore_entered = metascore is not None
-        if imdb_rating is None:
-            imdb_rating = _prompt_float_in_range("  IMDB rating (0.0-10.0): ", 0.0, 10.0, "IMDB rating")
-        if review_count == 0 and metascore_entered:
-            rc = _prompt_int_in_range("  Critic review count (0+): ", 0, 100_000, "review count")
-            review_count = rc if rc is not None else 0
-        if letterboxd_rating is None:
-            letterboxd_rating = _prompt_float_in_range(
-                "  Letterboxd rating (0.0-5.0): ", 0.0, 5.0, "Letterboxd rating"
-            )
-    except KeyboardInterrupt:
-        raise ManualEntryInterrupted(snapshot()) from None
+        result = _prompt_fields(start, allow_retitle)
+    except ManualEntryInterrupted as exc:
+        raise ManualEntryInterrupted(None if exc.partial == start else exc.partial) from None
 
-    result = snapshot()
-    if result is None:
+    if result == start:
         logger.info("Skipped manual entry for '%s'", title)
+        return None
     return result
 
 
@@ -260,17 +293,122 @@ def _manual_matches_existing(new: RawScores, prev: RawScores) -> bool:
     return True
 
 
+@dataclasses.dataclass
+class _Entry:
+    """One movie in the manual-entry queue."""
+    title: str
+    base: Optional[RawScores]      # scores before any typing; None when the fetch failed
+    result: Optional[RawScores]    # scores to write; None when there is nothing to write
+    position: Optional[int] = None # place in the prompt queue; None when not asked
+
+
+def _typed_fields(entry: _Entry, existing: dict) -> list:
+    """[(label, value)] for the scores typed in for *entry* this run."""
+    if entry.result is None:
+        return []
+    before = entry.base or existing.get(entry.title) or RawScores(entry.title, None, None, 0, None)
+    return [
+        (label, getattr(entry.result, field))
+        for field, label, _ in _SCORE_PROMPTS
+        if getattr(entry.result, field) != getattr(before, field)
+    ]
+
+
+def _ask_entry(entry: _Entry, total: int, existing: dict, retitle) -> bool:
+    """
+    Prompt for one movie, following any title corrections, and store the
+    outcome on *entry*.  Returns True when the user interrupted.
+    """
+    while True:
+        try:
+            if entry.base is not None:
+                entry.result = prompt_missing_scores(
+                    entry.base, entry.position, total, allow_retitle=retitle is not None
+                )
+            else:
+                entry.result = prompt_failed_movie(
+                    entry.title, entry.position, total,
+                    existing=existing.get(entry.title), allow_retitle=retitle is not None,
+                )
+            return False
+        except ManualEntryInterrupted as exc:
+            entry.result = exc.partial
+            return True
+        except TitleCorrection as exc:
+            try:
+                refetched = retitle(entry.title, exc.new_title)
+            except ValueError as err:
+                print(f"  {err}")
+                continue
+            except KeyboardInterrupt:
+                entry.result = entry.base
+                return True
+            entry.title = exc.new_title
+            entry.base = entry.result = refetched
+            if refetched is None:
+                print(f"  Still couldn't fetch '{entry.title}'.")
+            elif not has_blank_scores(refetched):
+                print(f"  Fetched '{entry.title}' — nothing left to enter.")
+                return False
+
+
+def _review_entries(asked: list, total: int, existing: dict, retitle) -> bool:
+    """
+    Show every score typed this run and let the user redo a movie or discard
+    the lot before anything is saved.  Returns True when the user interrupted
+    a redo (what was typed is kept, as with any other interrupt).
+    """
+    while True:
+        typed = [(e, _typed_fields(e, existing)) for e in asked]
+        typed = [(e, fields) for e, fields in typed if fields]
+        if not typed:
+            return False
+
+        print(f"\n  ── Review: typed scores for {len(typed)} movie(s) ──")
+        for n, (entry, fields) in enumerate(typed, start=1):
+            summary = " · ".join(f"{label} {value}" for label, value in fields)
+            print(f"  {n:>3}. {entry.title}: {summary}")
+        try:
+            choice = input(
+                "\n  Enter to save, a number to redo that movie, d to discard typed scores: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+        if choice == "":
+            return False
+        if choice == "d":
+            for entry, _ in typed:
+                entry.result = entry.base
+            print("  Typed scores discarded.")
+            return False
+        if choice.isdigit() and 1 <= int(choice) <= len(typed):
+            entry = typed[int(choice) - 1][0]
+            if _ask_entry(entry, total, existing, retitle):
+                return True
+            continue
+        print(f"  Enter a number from 1 to {len(typed)}, d, or just Enter.")
+
+
 def apply_manual_entry(
     raw_scores: list[RawScores],
     failed: list[str],
     manual: bool,
     existing: Optional[dict[str, RawScores]] = None,
+    retitle=None,
 ) -> tuple[list[RawScores], list[str], set[str]]:
     """
-    After Pass 1, optionally prompt the user for missing values.
+    After Pass 1, optionally prompt the user for missing values, then show
+    what was typed for review before it is saved.
 
     Ctrl-C stops the prompting but keeps every entry made so far, so the
     caller can still write them out.
+
+    *retitle*, when given, enables fixing a movie's title from the prompt.
+    It is called as retitle(old_title, new_title), must rename the movie
+    wherever the caller tracks it (including *existing*) and re-fetch it,
+    and returns the re-fetched RawScores or None when the fetch failed.  It
+    raises ValueError with a message when the new title can't be used.
 
     Returns:
         (raw_scores, failed, manual_unchanged)
@@ -282,62 +420,45 @@ def apply_manual_entry(
     if not manual:
         return raw_scores, failed, manual_unchanged
 
-    existing = existing or {}
+    existing = existing if existing is not None else {}
 
     # raw_scores should already include the workbook's existing values, so
     # only fields that are blank everywhere are asked about.  A failed movie
     # whose row is already complete isn't asked about either.
-    failed_to_ask = [t for t in failed if has_blank_scores(existing.get(t))]
-    total = sum(1 for raw in raw_scores if has_blank_scores(raw)) + len(failed_to_ask)
-    position = 0
-    entered = 0
+    entries = [_Entry(raw.title, raw, raw) for raw in raw_scores]
+    entries += [_Entry(title, None, None) for title in failed]
+    to_ask = [
+        e for e in entries
+        if has_blank_scores(e.base if e.base is not None else existing.get(e.title))
+    ]
+    total = len(to_ask)
+    asked = []
     interrupted = False
 
-    updated_raw = []
-    for raw in raw_scores:
-        if has_blank_scores(raw) and not interrupted:
-            position += 1
-            try:
-                filled = prompt_missing_scores(raw, position, total)
-            except ManualEntryInterrupted as exc:
-                interrupted = True
-                filled = exc.partial
-            if filled is not None:
-                prev = existing.get(raw.title)
-                if prev is not None and _manual_matches_existing(filled, prev):
-                    manual_unchanged.add(raw.title)
-                if filled != raw:
-                    entered += 1
-                raw = filled
-        updated_raw.append(raw)
-
-    still_failed = []
-    for title in failed:
-        if interrupted or title not in failed_to_ask:
-            still_failed.append(title)
-            continue
-        position += 1
-        try:
-            result = prompt_failed_movie(title, position, total, existing=existing.get(title))
-        except ManualEntryInterrupted as exc:
+    for position, entry in enumerate(to_ask, start=1):
+        entry.position = position
+        asked.append(entry)
+        if _ask_entry(entry, total, existing, retitle):
             interrupted = True
-            result = exc.partial
-        if result is not None:
-            prev = existing.get(title)
-            if prev is not None and _manual_matches_existing(result, prev):
-                manual_unchanged.add(title)
-            updated_raw.append(result)
-            entered += 1
-        else:
-            still_failed.append(title)
+            break
 
     if interrupted:
+        entered = sum(1 for e in asked if _typed_fields(e, existing))
         plural = "entry" if entered == 1 else "entries"
-        print(f"\n  Manual entry stopped at {position} of {total} — "
+        print(f"\n  Manual entry stopped at {len(asked)} of {total} — "
               f"keeping the {entered} {plural} already made.\n")
         logger.warning(
             "Manual entry interrupted at %d of %d movie(s); %d %s kept",
-            position, total, entered, plural,
+            len(asked), total, entered, plural,
         )
+    else:
+        _review_entries(asked, total, existing, retitle)
 
+    for entry in asked:
+        prev = existing.get(entry.title)
+        if entry.result is not None and prev is not None and _manual_matches_existing(entry.result, prev):
+            manual_unchanged.add(entry.title)
+
+    updated_raw = [e.result for e in entries if e.result is not None]
+    still_failed = [e.title for e in entries if e.result is None]
     return updated_raw, still_failed, manual_unchanged
