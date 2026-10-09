@@ -38,7 +38,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
 - **Data safety** — existing cell values are never overwritten by a missing result, and they still count in the composite when a source returns nothing this run. The workbook is only saved once, at the end of a run, so an interrupted run leaves it as it was, and the version being replaced is copied to `backups/` first (the last 5 are kept).
 - **Accurate stability tracking** — `StableWeeks` correctly resets when the composite score shifts by more than ±0.05; the previous value is snapshotted before any writes so the comparison is always against the real old score.
 - **Smart scheduling** — `--smart-update` reads `StableWeeks` to skip movies whose scores haven't changed, reducing network requests on repeat runs. A movie stable for N weeks is not re-fetched for N weeks — except movies with a blank or hand-typed score, which are re-checked every run so a source that adds the film later is picked up. (It reads the *input* workbook — see [Usage](#usage) if you write to a separate `--output`.)
-- **Manual entry that doesn't repeat itself** — `--manual` only asks about scores that are blank in the workbook, so anything you've typed in (or that was scraped before) is never asked again. Typed scores are tagged in a `Manual` column and replaced automatically once a source has the film. Ctrl-C stops the prompting without discarding anything already entered.
+- **Manual entry that doesn't repeat itself** — `--manual` only asks about scores that are blank in the workbook, so anything you've typed in (or that was scraped before) is never asked again — and neither is a score you left blank at the prompt (remembered in a `Skipped` column). Typed scores are tagged in a `Manual` column and replaced automatically once a source has the film. Ctrl-C stops the prompting without discarding anything already entered.
 - **Correctable prompts** — at a `--manual` prompt, `b` goes back a field and `t` fixes a typo'd title (the row is renamed and re-fetched). Everything typed is listed for review before it's saved, with the option to redo a movie or discard the lot.
 - **AI-powered slug resolution** — optional Gemini integration looks up hard-to-find movie pages with Google Search as a last resort, only for sources that couldn't find the film at all, and never asks the AI for scores. Every answer is verified (title + year) before use, and answers are cached between runs.
 
@@ -74,7 +74,7 @@ For every title in a personal Movies.xlsx watchlist, the tool:
     ├── test_scraper_properties.py        # Property: review count, rating range, back-off
     ├── test_orchestrator_properties.py   # Property: input unchanged, output columns
     ├── test_manual.py                    # Manual prompts: progress counter, Ctrl-C handling, back, title fix, review
-    ├── test_manual_workbook.py           # Blank-only prompts, Manual column, smart-update re-checks, Table1, title fix
+    ├── test_manual_workbook.py           # Blank-only prompts, Manual and Skipped columns, smart-update re-checks, Table1, title fix
     ├── test_year_disambiguation.py       # Year matching, auto-fill, and manual year prompts
     ├── test_open_output.py               # Auto-open, --no-open, locked-output guards, backups
     ├── test_gemini_validation.py         # Gemini IDs/slugs rejected unless title + year match
@@ -234,6 +234,9 @@ python update_scores.py --output Movies_updated.xlsx
 # Ask for unknown release years and missing values
 python update_scores.py --manual
 
+# ...and also for scores you left blank at an earlier prompt
+python update_scores.py --manual --ask-skipped
+
 # Adjust request delay (default 1.0s between sources)
 python update_scores.py --delay 2.0
 
@@ -247,7 +250,7 @@ On Windows, run these with the virtual environment's Python — `.venv\Scripts\p
 
 **`--smart-update` and the output file:** smart-update decides what to skip from the `StableWeeks`, `LastUpdated` and `Manual` columns of the *input* workbook. By default results are written back to the input, so stability history builds up on its own. If you pass a separate `--output`, the input is never changed and `--smart-update` never skips anything — run each time on the previous output instead (`--input Movies_updated.xlsx --output Movies_updated.xlsx`).
 
-Movies with a blank score, or a score you typed in (listed in `Manual`), are never skipped: they're re-checked every run, so when Metacritic, Letterboxd or OMDb adds the film later, the real score is picked up. Re-checking is silent — with `--manual` you're still only asked about cells that are blank.
+Movies with a blank score, or a score you typed in (listed in `Manual`), are never skipped: they're re-checked every run, so when Metacritic, Letterboxd or OMDb adds the film later, the real score is picked up. Re-checking is silent — with `--manual` you're still only asked about cells that are blank, and not about ones you've already left blank at a prompt (listed in `Skipped`).
 
 ### All CLI options
 
@@ -262,6 +265,7 @@ Movies with a blank score, or a score you typed in (listed in `Manual`), are nev
 | --verbose | off | Enable debug-level logging |
 | --smart-update | off | Skip recently-stable movies |
 | --manual | off | Prompt for unknown release years, then for scores blank in the workbook (`b` goes back, `t` fixes the title, Ctrl-C saves and stops) |
+| --ask-skipped | off | With `--manual`, also ask for scores left blank at an earlier prompt |
 | --gemini-key KEY | — | Gemini API key for AI slug resolution (overrides GEMINI_API_KEY env var) |
 | --random | off | Process movies in random order |
 | --no-rate-limit | off | Disable the adaptive per-domain rate limiter (use the fixed `--delay` only) |
@@ -299,10 +303,11 @@ Leave Year blank and the script fills it in for you (see **Output columns**) —
 | LastUpdated | ISO date of last successful fetch (YYYY-MM-DD) |
 | StableWeeks | Consecutive weeks the composite stayed within ±0.05 |
 | Manual | Scores in this row you typed in with `--manual` (e.g. `IMDB, Letterboxd`). Cleared per score once a source supplies it |
+| Skipped | Blank scores in this row you left blank at a `--manual` prompt (e.g. `Metacritic, Letterboxd`), so they aren't asked for again. Cleared per score once it's filled in; clear the cell yourself to be asked again |
 
 If a source returns nothing for a score this run, the value already in the cell is kept and used in the `st.*` and `TRUE` calculations. To clear a wrong value, delete the cell (and its entry in `Manual`).
 
-If the workbook has an Excel table named `Table1`, it's extended to cover any column the script adds (`Year`, `Manual`), so sorting the table in Excel keeps each row together.
+If the workbook has an Excel table named `Table1`, it's extended to cover any column the script adds (`Year`, `Manual`, `Skipped`), so sorting the table in Excel keeps each row together.
 
 ---
 
@@ -328,13 +333,14 @@ It then prompts for scores that are **blank in the workbook** and couldn't be fe
 ```
 
 - **Only blank cells are asked about.** A score already in the workbook — typed in on an earlier run, or scraped before — isn't asked again, even if the source still doesn't have it. So once you've filled a movie in, later runs stay quiet about it.
+- **A score you leave blank is asked about once.** Press Enter on a field and it's listed in the row's `Skipped` column; later runs don't ask for it. `--ask-skipped` asks for those again.
 - **Critic review count is only asked alongside a Metascore you type in.** A movie with no Metacritic page has no count to know, so it isn't asked on its own.
 - **Typed scores are tagged** in the `Manual` column. They count in the composite like any other score, and smart-update keeps re-checking the movie. When a source adds the film, its score replaces yours and the tag is removed.
 - **Movies that failed to fetch entirely** are asked about only for the fields their row is missing.
 
 The count covers movies with at least one blank score plus failed movies with blanks — complete movies are never prompted for.
 
-Press Enter to skip a field; the cell stays blank and you'll be asked again next run. **Ctrl-C (or end of input) stops the prompting without losing work** — every entry already made is written to the output workbook, including the fields typed for the movie you were on when you interrupted.
+Press Enter to skip a field; the cell stays blank and the field is listed in the row's `Skipped` column, so later runs don't ask for it again. The sources are still checked every run, and a score that turns up is filled in as usual. To be asked again — say a score exists by now but the fetch still can't find it — add `--ask-skipped` to a `--manual` run to be asked for every skipped score once more, or clear one row's `Skipped` cell. **Ctrl-C (or end of input) stops the prompting without losing work** — every entry already made is written to the output workbook, including the fields typed for the movie you were on when you interrupted.
 
 ### Fixing mistakes
 
@@ -397,7 +403,7 @@ To enable, set `GEMINI_API_KEY` or pass `--gemini-key` on the CLI. To turn it of
 | Results saved to `Movies_<timestamp>.xlsx` instead | The workbook was opened in Excel during the run. Close it and copy the timestamped file over `Movies.xlsx` |
 | `GeminiResolver: … API key not valid` | `GEMINI_API_KEY` in `.env` is still the `your_gemini_key_here` placeholder or is wrong. Set a real key, or remove the line to turn Gemini off |
 | A movie's title has a typo | Type `t` at one of its `--manual` score prompts and enter the correct title, or fix the cell in the workbook and run again |
-| A score you typed in is wrong, or you want to be asked again | During the run, type `b` to go back a field, or redo the movie from the review list. After it's saved: delete the cell (and its entry in the `Manual` column) in the workbook you feed back in; the next `--manual` run asks for it |
+| A score you typed in is wrong, or you want to be asked again | During the run, type `b` to go back a field, or redo the movie from the review list. After it's saved: delete the cell (and its entry in the `Manual` column) in the workbook you feed back in; the next `--manual` run asks for it. For a score you left blank at the prompt, run with `--manual --ask-skipped`, or clear the row's `Skipped` cell |
 | A Gemini answer looks wrong or stale | Delete `.gemini_cache.json` to clear cached answers (they also expire after 30 days) |
 | IMDB rating differs slightly from imdb.com | OMDb's copy of IMDb ratings lags a few days, most noticeably for new releases still gaining votes. The film is right; the number catches up |
 

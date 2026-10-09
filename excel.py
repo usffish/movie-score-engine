@@ -19,13 +19,18 @@ logger = logging.getLogger(__name__)
 EXPECTED_HEADERS = [
     "Movies", "Year", "Metacritic", "st.Metacritic", "Reviews",
     "Letterboxd", "st.Letterboxd", "IMDB", "st.IMDB", "TRUE",
-    "LastUpdated", "StableWeeks", "Manual",
+    "LastUpdated", "StableWeeks", "Manual", "Skipped",
 ]
 
 # Column listing which scores in a row were typed in with --manual rather than
 # scraped, e.g. "IMDB, Letterboxd".  A scraped value replaces a typed one and
 # clears it from this list; smart-update always re-checks rows listed here.
 MANUAL_COLUMN = "Manual"
+
+# Column listing which blank scores --manual asked for and the user left
+# blank, e.g. "Metacritic, Letterboxd".  --manual doesn't ask for these again
+# (clear the cell to be asked); a score that turns up later drops off the list.
+SKIPPED_COLUMN = "Skipped"
 
 # Raw-score field behind each column a manual entry can fill.
 MANUAL_FIELDS = {
@@ -150,7 +155,7 @@ def migrate_stability_columns(ws, header_map: dict) -> dict:
 def extend_table_to_stability_cols(ws) -> None:
     """
     Grow Table1 to cover every column the script manages (up to the last of
-    EXPECTED_HEADERS present, e.g. an appended Year or Manual column) and every
+    EXPECTED_HEADERS present, e.g. an appended Year or Skipped column) and every
     row, so sorting the table in Excel keeps each row's values together.
 
     Excel requires one tableColumn per column in the ref, named after its
@@ -189,9 +194,9 @@ def extend_table_to_stability_cols(ws) -> None:
     logger.debug("Updated %s ref to %s", _TABLE_NAME, new_ref)
 
 
-def read_manual_fields(ws, ws_row: int, header_map: dict) -> set:
-    """Return the set of column names listed in the row's Manual cell."""
-    col = header_map.get(MANUAL_COLUMN)
+def _read_field_list(ws, ws_row: int, header_map: dict, column: str) -> set:
+    """Return the set of score column names listed in the row's *column* cell."""
+    col = header_map.get(column)
     if col is None:
         return set()
     raw = ws.cell(row=ws_row, column=col).value
@@ -200,14 +205,34 @@ def read_manual_fields(ws, ws_row: int, header_map: dict) -> set:
     return {part.strip() for part in str(raw).split(",") if part.strip() in MANUAL_FIELDS}
 
 
-def write_manual_fields(ws, ws_row: int, header_map: dict, fields: set) -> None:
-    """Write *fields* to the row's Manual cell in column order; blank when empty."""
-    col = header_map.get(MANUAL_COLUMN)
+def _write_field_list(ws, ws_row: int, header_map: dict, column: str, fields: set) -> None:
+    """Write *fields* to the row's *column* cell in column order; blank when empty."""
+    col = header_map.get(column)
     if col is None:
         return
     ordered = [name for name in MANUAL_FIELDS if name in fields]
     # Assign directly: ws.cell(..., value=None) leaves the old value in place.
     ws.cell(row=ws_row, column=col).value = ", ".join(ordered) if ordered else None
+
+
+def read_manual_fields(ws, ws_row: int, header_map: dict) -> set:
+    """Return the set of column names listed in the row's Manual cell."""
+    return _read_field_list(ws, ws_row, header_map, MANUAL_COLUMN)
+
+
+def write_manual_fields(ws, ws_row: int, header_map: dict, fields: set) -> None:
+    """Write *fields* to the row's Manual cell in column order; blank when empty."""
+    _write_field_list(ws, ws_row, header_map, MANUAL_COLUMN, fields)
+
+
+def read_skipped_fields(ws, ws_row: int, header_map: dict) -> set:
+    """Return the set of column names listed in the row's Skipped cell."""
+    return _read_field_list(ws, ws_row, header_map, SKIPPED_COLUMN)
+
+
+def write_skipped_fields(ws, ws_row: int, header_map: dict, fields: set) -> None:
+    """Write *fields* to the row's Skipped cell in column order; blank when empty."""
+    _write_field_list(ws, ws_row, header_map, SKIPPED_COLUMN, fields)
 
 
 def read_existing_scores(ws, ws_row: int, header_map: dict) -> RawScores:

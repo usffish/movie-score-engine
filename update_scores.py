@@ -16,6 +16,7 @@ Usage
     python update_scores.py --api-key YOUR_KEY     # OMDb API key
     python update_scores.py --smart-update         # skip recently-stable movies
     python update_scores.py --manual               # prompt for missing values
+    python update_scores.py --manual --ask-skipped # also ask for scores skipped before
     python update_scores.py --random               # process movies in random order
 
 Output columns added / updated
@@ -59,10 +60,12 @@ from excel import (
     read_existing_scores,
     read_manual_fields,
     read_prev_composite,
+    read_skipped_fields,
     read_years,
     should_update,
     update_stability,
     write_manual_fields,
+    write_skipped_fields,
 )
 from manual import apply_manual_entry, prompt_unknown_years
 from scoring import (
@@ -387,6 +390,7 @@ def update_workbook(
     gemini_key: Optional[str] = None,
     random_order: bool = False,
     rate_limit: bool = True,
+    ask_skipped: bool = False,
 ):
     """
     Three-pass pipeline:
@@ -471,10 +475,15 @@ def update_workbook(
     movies = [t for _, t in movie_rows]
 
     existing_scores: dict = {}
+    # Scores (RawScores field names) left blank at an earlier --manual prompt.
+    skipped_by_title: dict = {}
     for ws_row, title in movie_rows:
         prev = read_existing_scores(ws, ws_row, header_map)
         prev.title = title
         existing_scores[title] = prev
+        skipped_by_title[title] = {
+            MANUAL_FIELDS[col] for col in read_skipped_fields(ws, ws_row, header_map)
+        }
 
     raw_scores, failed = fetch_all(
         movies, api_key=api_key, delay=delay, verbose=verbose,
@@ -531,6 +540,8 @@ def update_workbook(
             years[new_title] = years.pop(old_title)
         scraped_by_title.pop(old_title, None)
         before_manual.pop(old_title, None)
+        # Sources may well know the film under its right title: ask afresh.
+        skipped_by_title.pop(old_title, None)
         logger.info("Renamed '%s' to '%s'; fetching it again", old_title, new_title)
 
         refetched, _ = fetch_all(
@@ -544,10 +555,16 @@ def update_workbook(
         before_manual[new_title] = filled
         return filled
 
+    # --ask-skipped prompts as if nothing had been skipped before.  The lists
+    # themselves are kept, so a score left blank again stays skipped.
+    prompt_skips: dict = {} if ask_skipped else skipped_by_title
     raw_scores, failed, manual_unchanged = apply_manual_entry(
         raw_scores, failed, manual=prompt_scores, existing=existing_scores,
-        retitle=retitle,
+        retitle=retitle, skipped=prompt_skips,
     )
+    if ask_skipped:
+        for title, fields in prompt_skips.items():
+            skipped_by_title.setdefault(title, set()).update(fields)
     year_by_title = {r.title: r.year for r in raw_scores}
 
     # Which scores were typed in just now, recorded in the Manual column.
@@ -614,6 +631,14 @@ def update_workbook(
         manual_fields -= scraped_by_title.get(title, set())
         manual_fields |= entered_by_title.get(title, set())
         write_manual_fields(ws, ws_row, header_map, manual_fields)
+
+        # A score left blank at the prompt isn't asked for again — until it
+        # turns up (scraped or typed), when it drops off the list.
+        raw = scores_lookup[title]
+        write_skipped_fields(ws, ws_row, header_map, {
+            col for col, field in MANUAL_FIELDS.items()
+            if field in skipped_by_title.get(title, ()) and not _field_present(raw, field)
+        })
 
         is_unchanged = title in manual_unchanged
         update_stability(ws, ws_row, header_map, ns.composite, prev_comp, today, manual_unchanged=is_unchanged)
@@ -687,10 +712,20 @@ def parse_args(argv=None):
         help=(
             "Prompt for unknown release years, then for scores that are blank in "
             "the workbook and couldn't be fetched. Fields already filled (typed "
-            "in or scraped on an earlier run) aren't asked again. "
+            "in or scraped on an earlier run) aren't asked again, and neither "
+            "are fields you left blank at an earlier prompt (listed in the "
+            "Skipped column; clear the cell to be asked again). "
             "At a prompt, b goes back a field and t fixes the movie's title; "
             "typed scores are listed for review before saving. "
             "Ctrl-C stops the prompting and saves everything entered so far."
+        )
+    )
+    parser.add_argument(
+        "--ask-skipped", action="store_true", dest="ask_skipped",
+        help=(
+            "With --manual, also ask for scores you left blank at an earlier "
+            "prompt (listed in the Skipped column) — for a score a source has "
+            "by now but the fetch still can't find."
         )
     )
     parser.add_argument(
@@ -784,6 +819,7 @@ def main(argv=None):
         gemini_key=gemini_key,
         random_order=args.random,
         rate_limit=not args.no_rate_limit,
+        ask_skipped=args.ask_skipped,
     )
 
     if not args.no_open:

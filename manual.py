@@ -115,11 +115,13 @@ _SCORE_PROMPTS = (
 )
 
 
-def _prompt_fields(start: RawScores, allow_retitle: bool = False) -> RawScores:
+def _prompt_fields(start: RawScores, allow_retitle: bool = False,
+                   skip: frozenset = frozenset()) -> RawScores:
     """
     Ask for each score that is blank on *start* and return a copy with the
     answers merged in.  The critic review count is only asked for alongside a
     Metascore typed in now — without a Metacritic page there's no count to know.
+    Fields named in *skip* (left blank on an earlier run) aren't asked.
 
     Typing "b" returns to the previous field; "t" (when *allow_retitle*) asks
     for a corrected title and raises TitleCorrection.  Ctrl-C raises
@@ -135,7 +137,7 @@ def _prompt_fields(start: RawScores, allow_retitle: bool = False) -> RawScores:
     def wanted(field: str) -> bool:
         if field == "review_count":
             return start.review_count == 0 and entered.get("metascore") is not None
-        return getattr(start, field) is None
+        return getattr(start, field) is None and field not in skip
 
     def snapshot() -> RawScores:
         return dataclasses.replace(
@@ -176,27 +178,35 @@ def prompt_missing_scores(
     position: Optional[int] = None,
     total: Optional[int] = None,
     allow_retitle: bool = False,
+    skip: frozenset = frozenset(),
 ) -> RawScores:
     """
     Interactively prompt the user to fill in the blank fields on *raw*.
 
     *raw* should already carry the workbook's existing values for anything the
     scrapers didn't return, so fields filled on an earlier run aren't asked
-    again.  The critic review count is only asked for alongside a Metascore
-    typed in now — without a Metacritic page there's no count to know.
+    again.  Neither are the fields named in *skip*.  The critic review count
+    is only asked for alongside a Metascore typed in now — without a
+    Metacritic page there's no count to know.
 
     Returns a new RawScores with user-supplied values merged in.
     """
     print(f"\n  ── Manual entry for: {raw.title} ──{_progress_label(position, total)}")
     print(_hint(allow_retitle))
-    return _prompt_fields(raw, allow_retitle)
+    return _prompt_fields(raw, allow_retitle, skip)
 
 
-def has_blank_scores(raw: Optional[RawScores]) -> bool:
-    """True when a score the user could type in is still blank (Reviews alone doesn't count)."""
-    return raw is None or (
-        raw.metascore is None or raw.imdb_rating is None or raw.letterboxd_rating is None
-    )
+def _blank_fields(raw: Optional[RawScores]) -> set:
+    """Score fields the user could type in that are blank on *raw* (Reviews doesn't count)."""
+    return {
+        field for field in ("metascore", "imdb_rating", "letterboxd_rating")
+        if raw is None or getattr(raw, field) is None
+    }
+
+
+def has_blank_scores(raw: Optional[RawScores], skip=frozenset()) -> bool:
+    """True when a score the user could type in is still blank and isn't in *skip*."""
+    return bool(_blank_fields(raw) - set(skip))
 
 
 def prompt_failed_movie(
@@ -205,14 +215,15 @@ def prompt_failed_movie(
     total: Optional[int] = None,
     existing: Optional[RawScores] = None,
     allow_retitle: bool = False,
+    skip: frozenset = frozenset(),
 ) -> Optional[RawScores]:
     """
     Interactively prompt the user for the scores of a movie that failed
     entirely during fetch.
 
-    Fields already filled in *existing* (the workbook row) aren't asked again,
-    and the critic review count is only asked for alongside a Metascore typed
-    in now.
+    Fields already filled in *existing* (the workbook row) or named in *skip*
+    aren't asked again, and the critic review count is only asked for
+    alongside a Metascore typed in now.
 
     Returns a RawScores (existing values plus new entries) if the user enters
     at least one value, or None if nothing new was entered.
@@ -223,7 +234,7 @@ def prompt_failed_movie(
     start = dataclasses.replace(existing or RawScores(title, None, None, 0, None), title=title)
 
     try:
-        result = _prompt_fields(start, allow_retitle)
+        result = _prompt_fields(start, allow_retitle, skip)
     except ManualEntryInterrupted as exc:
         raise ManualEntryInterrupted(None if exc.partial == start else exc.partial) from None
 
@@ -300,6 +311,7 @@ class _Entry:
     base: Optional[RawScores]      # scores before any typing; None when the fetch failed
     result: Optional[RawScores]    # scores to write; None when there is nothing to write
     position: Optional[int] = None # place in the prompt queue; None when not asked
+    skipped: set = dataclasses.field(default_factory=set)  # fields asked for and left blank
 
 
 def _typed_fields(entry: _Entry, existing: dict) -> list:
@@ -314,22 +326,31 @@ def _typed_fields(entry: _Entry, existing: dict) -> list:
     ]
 
 
-def _ask_entry(entry: _Entry, total: int, existing: dict, retitle) -> bool:
+def _ask_entry(entry: _Entry, total: int, existing: dict, retitle, skipped: dict) -> bool:
     """
     Prompt for one movie, following any title corrections, and store the
     outcome on *entry*.  Returns True when the user interrupted.
+
+    *skipped* maps title -> fields left blank on an earlier run, which aren't
+    asked for.  Fields left blank this time are recorded on entry.skipped
+    once every prompt for the movie has been answered.
     """
     while True:
+        skip = frozenset(skipped.get(entry.title, ()))
         try:
             if entry.base is not None:
+                before = entry.base
                 entry.result = prompt_missing_scores(
-                    entry.base, entry.position, total, allow_retitle=retitle is not None
+                    before, entry.position, total, allow_retitle=retitle is not None,
+                    skip=skip,
                 )
             else:
+                before = existing.get(entry.title)
                 entry.result = prompt_failed_movie(
                     entry.title, entry.position, total,
-                    existing=existing.get(entry.title), allow_retitle=retitle is not None,
+                    existing=before, allow_retitle=retitle is not None, skip=skip,
                 )
+            entry.skipped = _blank_fields(entry.result if entry.result is not None else before)
             return False
         except ManualEntryInterrupted as exc:
             entry.result = exc.partial
@@ -345,6 +366,7 @@ def _ask_entry(entry: _Entry, total: int, existing: dict, retitle) -> bool:
                 return True
             entry.title = exc.new_title
             entry.base = entry.result = refetched
+            entry.skipped = set()
             if refetched is None:
                 print(f"  Still couldn't fetch '{entry.title}'.")
             elif not has_blank_scores(refetched):
@@ -352,7 +374,7 @@ def _ask_entry(entry: _Entry, total: int, existing: dict, retitle) -> bool:
                 return False
 
 
-def _review_entries(asked: list, total: int, existing: dict, retitle) -> bool:
+def _review_entries(asked: list, total: int, existing: dict, retitle, skipped: dict) -> bool:
     """
     Show every score typed this run and let the user redo a movie or discard
     the lot before anything is saved.  Returns True when the user interrupted
@@ -384,7 +406,7 @@ def _review_entries(asked: list, total: int, existing: dict, retitle) -> bool:
             return False
         if choice.isdigit() and 1 <= int(choice) <= len(typed):
             entry = typed[int(choice) - 1][0]
-            if _ask_entry(entry, total, existing, retitle):
+            if _ask_entry(entry, total, existing, retitle, skipped):
                 return True
             continue
         print(f"  Enter a number from 1 to {len(typed)}, d, or just Enter.")
@@ -396,6 +418,7 @@ def apply_manual_entry(
     manual: bool,
     existing: Optional[dict[str, RawScores]] = None,
     retitle=None,
+    skipped: Optional[dict[str, set]] = None,
 ) -> tuple[list[RawScores], list[str], set[str]]:
     """
     After Pass 1, optionally prompt the user for missing values, then show
@@ -410,6 +433,10 @@ def apply_manual_entry(
     and returns the re-fetched RawScores or None when the fetch failed.  It
     raises ValueError with a message when the new title can't be used.
 
+    *skipped* maps title -> score fields (RawScores names) the user left
+    blank on an earlier run; those aren't asked for again.  It is updated in
+    place with the fields left blank this run.
+
     Returns:
         (raw_scores, failed, manual_unchanged)
         where manual_unchanged is a set of titles whose manual entries were
@@ -421,15 +448,20 @@ def apply_manual_entry(
         return raw_scores, failed, manual_unchanged
 
     existing = existing if existing is not None else {}
+    skipped = skipped if skipped is not None else {}
 
     # raw_scores should already include the workbook's existing values, so
     # only fields that are blank everywhere are asked about.  A failed movie
-    # whose row is already complete isn't asked about either.
+    # whose row is already complete isn't asked about either, nor is a movie
+    # whose only blanks were skipped on an earlier run.
     entries = [_Entry(raw.title, raw, raw) for raw in raw_scores]
     entries += [_Entry(title, None, None) for title in failed]
     to_ask = [
         e for e in entries
-        if has_blank_scores(e.base if e.base is not None else existing.get(e.title))
+        if has_blank_scores(
+            e.base if e.base is not None else existing.get(e.title),
+            skipped.get(e.title, ()),
+        )
     ]
     total = len(to_ask)
     asked = []
@@ -438,7 +470,7 @@ def apply_manual_entry(
     for position, entry in enumerate(to_ask, start=1):
         entry.position = position
         asked.append(entry)
-        if _ask_entry(entry, total, existing, retitle):
+        if _ask_entry(entry, total, existing, retitle, skipped):
             interrupted = True
             break
 
@@ -452,7 +484,11 @@ def apply_manual_entry(
             len(asked), total, entered, plural,
         )
     else:
-        _review_entries(asked, total, existing, retitle)
+        _review_entries(asked, total, existing, retitle, skipped)
+
+    for entry in asked:
+        if entry.skipped:
+            skipped.setdefault(entry.title, set()).update(entry.skipped)
 
     for entry in asked:
         prev = existing.get(entry.title)
