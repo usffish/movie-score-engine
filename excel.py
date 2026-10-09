@@ -19,18 +19,13 @@ logger = logging.getLogger(__name__)
 EXPECTED_HEADERS = [
     "Movies", "Year", "Metacritic", "st.Metacritic", "Reviews",
     "Letterboxd", "st.Letterboxd", "IMDB", "st.IMDB", "TRUE",
-    "LastUpdated", "StableWeeks", "Manual", "Skipped",
+    "LastUpdated", "StableWeeks", "Manual", "SkippedOn", "SkipWeeks",
 ]
 
 # Column listing which scores in a row were typed in with --manual rather than
 # scraped, e.g. "IMDB, Letterboxd".  A scraped value replaces a typed one and
 # clears it from this list; smart-update always re-checks rows listed here.
 MANUAL_COLUMN = "Manual"
-
-# Column listing which blank scores --manual asked for and the user left
-# blank, e.g. "Metacritic, Letterboxd".  --manual doesn't ask for these again
-# (clear the cell to be asked); a score that turns up later drops off the list.
-SKIPPED_COLUMN = "Skipped"
 
 # Raw-score field behind each column a manual entry can fill.
 MANUAL_FIELDS = {
@@ -155,7 +150,7 @@ def migrate_stability_columns(ws, header_map: dict) -> dict:
 def extend_table_to_stability_cols(ws) -> None:
     """
     Grow Table1 to cover every column the script manages (up to the last of
-    EXPECTED_HEADERS present, e.g. an appended Year or Skipped column) and every
+    EXPECTED_HEADERS present, e.g. an appended Year or SkipWeeks column) and every
     row, so sorting the table in Excel keeps each row's values together.
 
     Excel requires one tableColumn per column in the ref, named after its
@@ -194,9 +189,9 @@ def extend_table_to_stability_cols(ws) -> None:
     logger.debug("Updated %s ref to %s", _TABLE_NAME, new_ref)
 
 
-def _read_field_list(ws, ws_row: int, header_map: dict, column: str) -> set:
-    """Return the set of score column names listed in the row's *column* cell."""
-    col = header_map.get(column)
+def read_manual_fields(ws, ws_row: int, header_map: dict) -> set:
+    """Return the set of column names listed in the row's Manual cell."""
+    col = header_map.get(MANUAL_COLUMN)
     if col is None:
         return set()
     raw = ws.cell(row=ws_row, column=col).value
@@ -205,34 +200,14 @@ def _read_field_list(ws, ws_row: int, header_map: dict, column: str) -> set:
     return {part.strip() for part in str(raw).split(",") if part.strip() in MANUAL_FIELDS}
 
 
-def _write_field_list(ws, ws_row: int, header_map: dict, column: str, fields: set) -> None:
-    """Write *fields* to the row's *column* cell in column order; blank when empty."""
-    col = header_map.get(column)
+def write_manual_fields(ws, ws_row: int, header_map: dict, fields: set) -> None:
+    """Write *fields* to the row's Manual cell in column order; blank when empty."""
+    col = header_map.get(MANUAL_COLUMN)
     if col is None:
         return
     ordered = [name for name in MANUAL_FIELDS if name in fields]
     # Assign directly: ws.cell(..., value=None) leaves the old value in place.
     ws.cell(row=ws_row, column=col).value = ", ".join(ordered) if ordered else None
-
-
-def read_manual_fields(ws, ws_row: int, header_map: dict) -> set:
-    """Return the set of column names listed in the row's Manual cell."""
-    return _read_field_list(ws, ws_row, header_map, MANUAL_COLUMN)
-
-
-def write_manual_fields(ws, ws_row: int, header_map: dict, fields: set) -> None:
-    """Write *fields* to the row's Manual cell in column order; blank when empty."""
-    _write_field_list(ws, ws_row, header_map, MANUAL_COLUMN, fields)
-
-
-def read_skipped_fields(ws, ws_row: int, header_map: dict) -> set:
-    """Return the set of column names listed in the row's Skipped cell."""
-    return _read_field_list(ws, ws_row, header_map, SKIPPED_COLUMN)
-
-
-def write_skipped_fields(ws, ws_row: int, header_map: dict, fields: set) -> None:
-    """Write *fields* to the row's Skipped cell in column order; blank when empty."""
-    _write_field_list(ws, ws_row, header_map, SKIPPED_COLUMN, fields)
 
 
 def read_existing_scores(ws, ws_row: int, header_map: dict) -> RawScores:
@@ -322,33 +297,44 @@ def _has_missing_scores(ws, ws_row: int, header_map: dict) -> bool:
     return False
 
 
+def _read_date_and_weeks(ws, ws_row: int, header_map: dict,
+                         date_header: str, weeks_header: str) -> tuple:
+    """
+    Read (when: date | None, weeks: int) from a date column and its week-count
+    column in the workbook row.
+    """
+    when = None
+    date_col = header_map.get(date_header)
+    if date_col:
+        raw = ws.cell(row=ws_row, column=date_col).value
+        if raw:
+            try:
+                if isinstance(raw, datetime):
+                    when = raw.date()
+                elif isinstance(raw, date):
+                    when = raw
+                else:
+                    when = date.fromisoformat(str(raw)[:10])
+            except (ValueError, TypeError):
+                pass
+
+    weeks = 0
+    weeks_col = header_map.get(weeks_header)
+    if weeks_col:
+        raw = ws.cell(row=ws_row, column=weeks_col).value
+        try:
+            weeks = int(raw) if raw is not None else 0
+        except (ValueError, TypeError):
+            weeks = 0
+
+    return when, weeks
+
+
 def _read_stability(ws, ws_row: int, header_map: dict) -> tuple:
     """
     Read (last_updated: date | None, stable_weeks: int) from the workbook row.
     """
-    last_updated = None
-    lu_col = header_map.get("LastUpdated")
-    if lu_col:
-        raw = ws.cell(row=ws_row, column=lu_col).value
-        if raw:
-            try:
-                if isinstance(raw, (datetime, date)):
-                    last_updated = raw if isinstance(raw, date) else raw.date()
-                else:
-                    last_updated = date.fromisoformat(str(raw)[:10])
-            except (ValueError, TypeError):
-                pass
-
-    stable_weeks = 0
-    sw_col = header_map.get("StableWeeks")
-    if sw_col:
-        raw = ws.cell(row=ws_row, column=sw_col).value
-        try:
-            stable_weeks = int(raw) if raw is not None else 0
-        except (ValueError, TypeError):
-            stable_weeks = 0
-
-    return last_updated, stable_weeks
+    return _read_date_and_weeks(ws, ws_row, header_map, "LastUpdated", "StableWeeks")
 
 
 def should_update(ws, ws_row: int, header_map: dict, today: date) -> bool:
@@ -371,6 +357,57 @@ def should_update(ws, ws_row: int, header_map: dict, today: date) -> bool:
 
     days_since = (today - last_updated).days
     return days_since >= stable_weeks * 7
+
+
+def should_ask(ws, ws_row: int, header_map: dict, today: date) -> bool:
+    """
+    Return True if --manual should ask about this row's blank scores in a
+    smart-update run.
+
+    The prompts back off the way fetching does: a row whose scores were left
+    blank at the prompt N times running (SkipWeeks) isn't asked about again
+    until N weeks after the last time (SkippedOn).  StableWeeks itself can't
+    be used — a row with a blank score is re-fetched, and so counted, on
+    every run.
+    """
+    skipped_on, skip_weeks = _read_date_and_weeks(ws, ws_row, header_map, "SkippedOn", "SkipWeeks")
+
+    if skipped_on is None or skip_weeks == 0:
+        return True
+
+    days_since = (today - skipped_on).days
+    return days_since >= skip_weeks * 7
+
+
+def update_skip(
+    ws,
+    ws_row: int,
+    header_map: dict,
+    today: date,
+    has_blank: bool,
+    skipped: bool,
+) -> None:
+    """
+    Update SkippedOn and SkipWeeks for a row after the manual prompts.
+
+    *skipped* means the row was asked about this run and a score was left
+    blank: SkippedOn becomes today and SkipWeeks goes up by 1.  A row with no
+    blank score left (*has_blank* False) has both cleared.  Otherwise the row
+    wasn't asked about, and both stay as they are.
+    """
+    on_col = header_map.get("SkippedOn")
+    weeks_col = header_map.get("SkipWeeks")
+    if not on_col or not weeks_col:
+        return
+
+    if not has_blank:
+        # Assign directly: ws.cell(..., value=None) leaves the old value in place.
+        ws.cell(row=ws_row, column=on_col).value = None
+        ws.cell(row=ws_row, column=weeks_col).value = None
+    elif skipped:
+        _, prev_skip_weeks = _read_date_and_weeks(ws, ws_row, header_map, "SkippedOn", "SkipWeeks")
+        ws.cell(row=ws_row, column=on_col, value=today.isoformat())
+        ws.cell(row=ws_row, column=weeks_col, value=prev_skip_weeks + 1)
 
 
 def read_prev_composite(ws, ws_row: int, header_map: dict) -> Optional[float]:

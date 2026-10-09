@@ -7,7 +7,7 @@ Covers:
 - failed movies: only blank fields are asked; complete rows aren't asked
 - the Manual column records typed scores; a scraped score replaces a typed
   one and clears it
-- a score left blank at the prompt is listed in Skipped and not asked again
+- a movie left blank at the prompt waits SkipWeeks weeks under smart-update
 - typed/existing scores count in the composite
 - smart-update always re-checks rows with a blank or typed score
 - Table1 grows to cover added columns (header names + autoFilter)
@@ -15,7 +15,7 @@ Covers:
 
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -93,42 +93,33 @@ class TestPrompts(unittest.TestCase):
         self.assertEqual(failed, ["X"])
         self.assertEqual(updated, [])
 
-    def test_skipped_field_is_not_asked(self):
+    def test_movie_not_due_is_not_prompted(self):
         raw = scores("A", imdb=7.0)
-        result, prompts = self.ask(
-            prompt_missing_scores, raw, inputs=["3.5"], skip=frozenset({"metascore"})
-        )
-        self.assertEqual(prompts, ["Letterboxd rating (0.0-5.0):"])
-        self.assertEqual(result.letterboxd_rating, 3.5)
-
-    def test_movie_with_only_skipped_blanks_is_not_prompted(self):
-        raw = scores("A", imdb=7.0)
-        skipped = {"A": {"metascore", "letterboxd_rating"}}
         with patch("builtins.input", side_effect=AssertionError("should not prompt")):
-            updated, _, _ = apply_manual_entry([raw], [], manual=True, skipped=skipped)
+            updated, _, _ = apply_manual_entry([raw], [], manual=True, not_due={"A"})
         self.assertEqual(updated, [raw])
 
-    def test_blank_answers_are_recorded_as_skipped(self):
-        skipped = {}
-        _, prompts = self.ask(
-            apply_manual_entry, [scores("A")], [], manual=True, skipped=skipped,
-            inputs=["", "7.0", ""],
+    def test_movie_left_blank_is_reported_as_skipped(self):
+        skipped = set()
+        self.ask(
+            apply_manual_entry, [scores("A"), scores("B")], [], manual=True, skipped=skipped,
+            inputs=["", "7.0", "", "70", "7.0", "5", "3.5", ""],
         )
-        self.assertEqual(skipped, {"A": {"metascore", "letterboxd_rating"}})
+        self.assertEqual(skipped, {"A"})
 
-    def test_interrupted_movie_records_no_skips(self):
-        skipped = {}
+    def test_interrupted_movie_is_not_reported_as_skipped(self):
+        skipped = set()
         with patch("builtins.input", side_effect=["", KeyboardInterrupt]), patch("builtins.print"):
             apply_manual_entry([scores("A")], [], manual=True, skipped=skipped)
-        self.assertEqual(skipped, {})
+        self.assertEqual(skipped, set())
 
-    def test_discarded_scores_are_not_recorded_as_skipped(self):
-        skipped = {}
+    def test_discarded_scores_are_not_reported_as_skipped(self):
+        skipped = set()
         self.ask(
             apply_manual_entry, [scores("A", lb=3.5)], [], manual=True, skipped=skipped,
-            inputs=["", "7.0", "d"],
+            inputs=["70", "7.0", "5", "d"],
         )
-        self.assertEqual(skipped, {"A": {"metascore"}})
+        self.assertEqual(skipped, set())
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +182,11 @@ class TestTableGrowth(unittest.TestCase):
         table.tableColumns = [TableColumn(id=1, name="Movies"), TableColumn(id=2, name="Metacritic")]
         ws.add_table(table)
 
-        hm = ensure_headers(ws, get_header_map(ws))  # appends Year ... Skipped
+        hm = ensure_headers(ws, get_header_map(ws))  # appends Year ... SkipWeeks
         extend_table_to_stability_cols(ws)
 
         table = ws.tables["Table1"]
-        last = hm["Skipped"]
+        last = hm["SkipWeeks"]
         self.assertEqual(table.ref, f"A1:{openpyxl.utils.get_column_letter(last)}3")
         self.assertEqual(table.autoFilter.ref, table.ref)
         names = [c.name for c in table.tableColumns]
@@ -278,33 +269,54 @@ class TestManualAcrossRuns(unittest.TestCase):
         self.assertEqual(cell("IMDB"), 7.4)      # real score replaces the typed one
         self.assertIsNone(cell("Manual"))
 
-    def test_skipped_score_is_not_asked_again(self):
-        prompts, cell = self._run(imdb_alpha=None, inputs=[""])
+    def _set_alpha(self, col, value):
+        wb = openpyxl.load_workbook(self.book)
+        ws = wb.active
+        hm = get_header_map(ws)
+        row = {ws.cell(r, hm["Movies"]).value: r for r in range(2, ws.max_row + 1)}["Alpha"]
+        ws.cell(row, hm[col]).value = value
+        wb.save(self.book)
+
+    def test_skipped_movie_waits_like_a_stable_one(self):
+        prompts, cell = self._run(imdb_alpha=None, inputs=[""], smart_update=True)
         self.assertEqual(prompts, ["IMDB rating (0.0-10.0):"])
         self.assertIsNone(cell("IMDB"))
-        self.assertEqual(cell("Skipped"), "IMDB")
+        self.assertEqual(cell("SkippedOn"), date.today().isoformat())
+        self.assertEqual(cell("SkipWeeks"), 1)
 
-        prompts, cell = self._run(imdb_alpha=None, inputs=[])
-        self.assertEqual(prompts, [])            # left blank last run: not asked again
-        self.assertEqual(cell("Skipped"), "IMDB")
+        prompts, cell = self._run(imdb_alpha=None, inputs=[], smart_update=True)
+        self.assertEqual(prompts, [])            # left blank this week: not asked
+        self.assertEqual(cell("SkipWeeks"), 1)
 
-        prompts, cell = self._run(imdb_alpha=7.4, inputs=[])
+        self._set_alpha("SkippedOn", (date.today() - timedelta(days=7)).isoformat())
+        prompts, cell = self._run(imdb_alpha=None, inputs=[""], smart_update=True)
+        self.assertEqual(prompts, ["IMDB rating (0.0-10.0):"])   # a week on: asked again
+        self.assertEqual(cell("SkippedOn"), date.today().isoformat())
+        self.assertEqual(cell("SkipWeeks"), 2)                     # next wait is two weeks
+
+        self._set_alpha("SkippedOn", (date.today() - timedelta(days=7)).isoformat())
+        prompts, cell = self._run(imdb_alpha=None, inputs=[], smart_update=True)
+        self.assertEqual(prompts, [])
+
+        prompts, cell = self._run(imdb_alpha=7.4, inputs=[], smart_update=True)
         self.assertEqual(prompts, [])
         self.assertEqual(cell("IMDB"), 7.4)      # the source has it now
-        self.assertIsNone(cell("Skipped"))
+        self.assertIsNone(cell("SkippedOn"))
+        self.assertIsNone(cell("SkipWeeks"))
 
-    def test_ask_skipped_asks_for_skipped_scores_again(self):
-        self._run(imdb_alpha=None, inputs=[""])
-
-        prompts, cell = self._run(imdb_alpha=None, inputs=[""], ask_skipped=True)
-        self.assertEqual(prompts, ["IMDB rating (0.0-10.0):"])
-        self.assertEqual(cell("Skipped"), "IMDB")   # left blank again: still skipped
-
-        prompts, cell = self._run(imdb_alpha=None, inputs=["7.0"], ask_skipped=True)
-        self.assertEqual(prompts[0], "IMDB rating (0.0-10.0):")
+    def test_typed_score_ends_the_wait(self):
+        self._run(imdb_alpha=None, inputs=[""], smart_update=True)
+        self._set_alpha("SkippedOn", (date.today() - timedelta(days=7)).isoformat())
+        prompts, cell = self._run(imdb_alpha=None, inputs=["7.0"], smart_update=True)
         self.assertEqual(cell("IMDB"), 7.0)
-        self.assertEqual(cell("Manual"), "IMDB")
-        self.assertIsNone(cell("Skipped"))
+        self.assertIsNone(cell("SkippedOn"))
+        self.assertIsNone(cell("SkipWeeks"))
+
+    def test_manual_without_smart_update_asks_regardless(self):
+        self._run(imdb_alpha=None, inputs=[""], smart_update=True)
+        prompts, cell = self._run(imdb_alpha=None, inputs=[""])
+        self.assertEqual(prompts, ["IMDB rating (0.0-10.0):"])
+        self.assertEqual(cell("SkipWeeks"), 2)
 
 
 class TestTitleFix(unittest.TestCase):
