@@ -15,7 +15,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from scraper.http import retry_get, slugify as _slugify, titles_match, years_differ
+from scraper.http import normalise_title, retry_get, slugify as _slugify, titles_match, years_differ
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,12 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-_SEARCH_URL = "https://letterboxd.com/search/films/{query}/"
+# The site's own search pages (letterboxd.com/search/...) sit behind a
+# Cloudflare challenge and answer 403; the API's search does not.
+_SEARCH_URL = "https://api.letterboxd.com/api/v0/search"
 _FILM_URL = "https://letterboxd.com/film/{slug}/"
+# Redirects to the film's page; an unknown ID gets a 200 "not found" page.
+_IMDB_URL = "https://letterboxd.com/imdb/{imdb_id}/"
 
 
 
@@ -137,35 +141,79 @@ def _year_mismatch(soup: BeautifulSoup, year: Optional[int]) -> bool:
     return years_differ(_parse_year_from_soup(soup), year)
 
 
-def _search_for_slug(title: str, rate_limiter=None) -> Optional[str]:
-    """Search Letterboxd and return the slug of the best matching film."""
-    query = re.sub(r"\s+", "+", title.strip())
-    url = _SEARCH_URL.format(query=query)
-    soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")
-    if soup is None:
-        return None
+def _canonical_film_url(soup: BeautifulSoup) -> Optional[str]:
+    """The film page's own URL from og:url, or None when *soup* isn't a film page."""
+    meta = soup.find("meta", property="og:url")
+    url = meta.get("content") if meta else None
+    if isinstance(url, str) and re.search(r"/film/[^/]+/?$", url):
+        return url
+    return None
 
-    results = soup.select("ul.results li.film-detail")
-    if not results:
-        results = soup.select("li.film-detail")
 
-    title_lower = title.lower().strip()
-    for item in results:
-        link = item.select_one("a[href^='/film/']")
-        if not link:
-            continue
-        film_title_tag = item.select_one("h2.film-title, .film-title")
-        film_title = film_title_tag.get_text(strip=True).lower() if film_title_tag else ""
-        href = link["href"]
-        slug = href.strip("/").split("/")[-1]
+def _search_queries(title: str) -> list:
+    """
+    Queries to try for *title*, most specific first: the title itself, then
+    without bracketed notes, then without a subtitle.  The search returns
+    nothing for "The Paradise (Telugu)" or "Adore Him: He is Here" but finds
+    "The Paradise" and "Adore Him".
+    """
+    title = title.strip()
+    plain = re.sub(r"\s*[(\[][^)\]]*[)\]]", "", title).strip()
+    queries = []
+    for query in (title, plain, plain.split(":")[0].strip()):
+        if query and query not in queries:
+            queries.append(query)
+    return queries
 
-        if film_title == title_lower:
-            return slug
 
-    first = soup.select_one("a[href^='/film/']")
-    if first:
-        href = first["href"]
-        return href.strip("/").split("/")[-1]
+def _search_films(query: str, rate_limiter=None) -> list:
+    """Search Letterboxd for *query*; returns [(name, year, slug)] in ranked order."""
+    resp = retry_get(
+        SESSION, _SEARCH_URL,
+        params={"input": query, "include": "FilmSearchItem", "perPage": 10},
+        rate_limiter=rate_limiter, domain="letterboxd.com",
+        abort_on_404=True, label="Letterboxd",
+    )
+    if resp is None:
+        return []
+
+    films = []
+    try:
+        for item in resp.json().get("items", []):
+            film = item.get("film") or {}
+            for link in film.get("links", []):
+                match = re.search(r"letterboxd\.com/film/([^/]+)", link.get("url", ""))
+                if link.get("type") == "letterboxd" and match:
+                    films.append((film.get("name"), film.get("releaseYear"), match.group(1)))
+                    break
+    except (ValueError, TypeError, AttributeError):
+        return []
+    return films
+
+
+def _search_for_slug(title: str, year: Optional[int] = None, rate_limiter=None) -> Optional[str]:
+    """
+    Search Letterboxd and return the slug of the best matching film.
+
+    A result must name the same film (titles_match).  Failing that, one whose
+    title contains ours or the reverse is accepted when a known year confirms
+    it — a row titled "The Paradise (Telugu)" is Letterboxd's "The Paradise".
+    """
+    wanted = normalise_title(title)
+
+    for query in _search_queries(title):
+        films = _search_films(query, rate_limiter=rate_limiter)
+
+        for name, film_year, slug in films:
+            if titles_match(name, title) and not years_differ(film_year, year):
+                return slug
+
+        for name, film_year, slug in films:
+            found = normalise_title(name or "")
+            if not wanted or not found or not year or not film_year or years_differ(film_year, year):
+                continue
+            if f" {wanted} " in f" {found} " or f" {found} " in f" {wanted} ":
+                return slug
 
     return None
 
@@ -195,7 +243,7 @@ def _candidate_slugs(title: str, year: Optional[int] = None) -> list:
 
 
 def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
-                        rate_limiter=None) -> dict:
+                        rate_limiter=None, imdb_id: Optional[str] = None) -> dict:
     """
     Fetch Letterboxd average rating and rating count for a movie.
 
@@ -205,6 +253,9 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
         resolver: Optional GeminiResolver instance.  When all local slug
                   candidates and the site search have failed, the resolver is
                   asked for the correct slug as a last resort.
+        imdb_id:  Optional IMDb ID of the film (e.g. from OMDb).  When the
+                  slug candidates fail, Letterboxd is asked for the film
+                  with that ID before falling back to search.
 
     Returns:
         dict with keys: rating (float|None), rating_count (int|None), url (str|None),
@@ -228,8 +279,20 @@ def get_letterboxd_data(title: str, year: Optional[int] = None, resolver=None,
             result["year"] = _parse_year_from_soup(soup)
             return result
 
+    if imdb_id:
+        logger.info("Letterboxd: direct slugs failed for '%s', trying IMDb ID %s", title, imdb_id)
+        soup = _fetch(_IMDB_URL.format(imdb_id=imdb_id), rate_limiter=rate_limiter,
+                      domain="letterboxd.com")
+        url = _canonical_film_url(soup) if soup is not None else None
+        if url is not None and not _year_mismatch(soup, year):
+            result["url"] = url
+            result["rating"] = _parse_rating_from_soup(soup)
+            result["rating_count"] = _parse_review_count_from_soup(soup)
+            result["year"] = _parse_year_from_soup(soup)
+            return result
+
     logger.info("Letterboxd: direct slugs failed for '%s', trying search", title)
-    slug = _search_for_slug(title, rate_limiter=rate_limiter)
+    slug = _search_for_slug(title, year=year, rate_limiter=rate_limiter)
     if slug is not None:
         url = _FILM_URL.format(slug=slug)
         soup = _fetch(url, rate_limiter=rate_limiter, domain="letterboxd.com")

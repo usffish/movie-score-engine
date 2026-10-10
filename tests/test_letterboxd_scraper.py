@@ -2,7 +2,9 @@
 Unit tests for scraper/letterboxd_scraper.py.
 
 Covers:
-- 404 on direct URL triggers search fallback
+- 404 on direct URL triggers search fallback (the API search, matched by
+  title, or by year when the titles only overlap)
+- an IMDb ID is tried before the search
 - Both URLs failing returns None
 - Retry count exactly 3 on network failure
 """
@@ -60,18 +62,31 @@ def _html_no_rating() -> str:
     return "<html><body><h1>Some Film</h1></body></html>"
 
 
-def _search_html_with_slug(slug: str) -> str:
-    """Build a minimal search results page pointing to a film slug."""
+def _search_response(*films) -> MagicMock:
+    """Build a search API response listing (name, year, slug) films in order."""
+    resp = _make_response()
+    resp.json.return_value = {"items": [
+        {
+            "type": "FilmSearchItem",
+            "film": {
+                "name": name,
+                "releaseYear": year,
+                "links": [{"type": "letterboxd", "url": f"https://letterboxd.com/film/{slug}/"}],
+            },
+        }
+        for name, year, slug in films
+    ]}
+    return resp
+
+
+def _film_page(title: str, year: int, rating: float, slug: str) -> str:
+    """Build a film page as Letterboxd serves it after an /imdb/<id>/ redirect."""
     return f"""
-    <html><body>
-    <ul class="results">
-      <li class="film-detail">
-        <a href="/film/{slug}/">
-          <h2 class="film-title">Some Film</h2>
-        </a>
-      </li>
-    </ul>
-    </body></html>
+    <html><head>
+    <meta property="og:url" content="https://letterboxd.com/film/{slug}/">
+    <meta property="og:title" content="{title} ({year})">
+    <meta itemprop="ratingValue" content="{rating}">
+    </head><body></body></html>
     """
 
 
@@ -82,14 +97,14 @@ class TestGetLetterboxdData(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_404_on_direct_url_triggers_search_fallback(self):
         """When all direct slug candidates return 404, the scraper falls back to search."""
-        search_html = _search_html_with_slug("some-film")
+        search = _search_response(("Some Film", 2020, "some-film-2020"))
         movie_html = _html_with_itemprop_rating(3.8)
 
         responses = [
             _make_404(),                    # some-film -> 404
             _make_404(),                    # some-film-1 -> 404
             _make_404(),                    # some-film-2 -> 404
-            _make_response(search_html),    # search page
+            search,                         # search API
             _make_response(movie_html),     # film page from search slug
         ]
 
@@ -101,14 +116,16 @@ class TestGetLetterboxdData(unittest.TestCase):
 
     def test_404_on_direct_url_search_returns_correct_slug(self):
         """Search fallback resolves the correct slug and fetches the film page."""
-        search_html = _search_html_with_slug("boogie-nights")
+        search = _search_response(
+            ("Boogie", 2021, "boogie"), ("Boogie Nights", 1997, "boogie-nights-1997"),
+        )
         movie_html = _html_with_itemprop_rating(4.1)
 
         responses = [
             _make_404(),                    # boogie-nights -> 404
             _make_404(),                    # boogie-nights-1 -> 404
             _make_404(),                    # boogie-nights-2 -> 404
-            _make_response(search_html),    # search page
+            search,                         # search API
             _make_response(movie_html),     # film page from search slug
         ]
 
@@ -117,6 +134,89 @@ class TestGetLetterboxdData(unittest.TestCase):
 
         self.assertIsNotNone(result["rating"])
         self.assertAlmostEqual(result["rating"], 4.1, places=5)
+        self.assertEqual(result["url"], "https://letterboxd.com/film/boogie-nights-1997/")
+
+    def test_search_accepts_overlapping_title_when_year_confirms(self):
+        """A row titled "The Paradise (Telugu)" is "The Paradise"; the year settles it."""
+        responses = [
+            _make_404(), _make_404(), _make_404(), _make_404(),   # 4 slug candidates
+            _search_response(),                                   # "The Paradise (Telugu)": nothing
+            _search_response(                                     # "The Paradise"
+                ("The Paradise", 2022, "the-paradise"), ("The Paradise", 2026, "the-paradise-2026"),
+            ),
+            _make_response(_film_page("The Paradise", 2026, 1.87, "the-paradise-2026")),
+        ]
+
+        with patch("scraper.letterboxd_scraper.SESSION.get", side_effect=responses) as mock_get:
+            result = get_letterboxd_data("The Paradise (Telugu)", year=2026)
+
+        self.assertAlmostEqual(result["rating"], 1.87, places=5)
+        queries = [c.kwargs["params"]["input"] for c in mock_get.call_args_list[4:6]]
+        self.assertEqual(queries, ["The Paradise (Telugu)", "The Paradise"])
+
+    def test_search_rejects_other_films(self):
+        """A result that isn't the film — other title, or same title from another year — is not used."""
+        responses = [
+            _make_404(), _make_404(), _make_404(), _make_404(),   # 4 slug candidates
+            _search_response(
+                ("Queen: Live in Budapest", 1986, "queen-live-in-budapest"),
+                ("Pluto Rising", 2026, "pluto-rising"),
+                ("Pluto", 2012, "pluto-2012"),
+            ),
+        ]
+
+        with patch("scraper.letterboxd_scraper.SESSION.get", side_effect=responses):
+            result = get_letterboxd_data("Pluto Nights", year=2026)
+
+        self.assertIsNone(result["url"])
+
+    def test_search_without_year_needs_matching_title(self):
+        responses = [
+            _make_404(), _make_404(), _make_404(),                # 3 slug candidates
+            _search_response(),
+            _search_response(("The Paradise", 2026, "the-paradise-2026")),
+        ]
+
+        with patch("scraper.letterboxd_scraper.SESSION.get", side_effect=responses):
+            result = get_letterboxd_data("The Paradise (Telugu)")
+
+        self.assertIsNone(result["url"])
+
+    # ------------------------------------------------------------------
+    # IMDb ID lookup
+    # ------------------------------------------------------------------
+    def test_imdb_id_is_tried_before_search(self):
+        responses = [
+            _make_404(), _make_404(), _make_404(), _make_404(),   # 4 slug candidates
+            _make_response(_film_page("1: Nenokkadine", 2014, 3.56, "1-nenokkadine")),
+        ]
+
+        with patch("scraper.letterboxd_scraper.SESSION.get", side_effect=responses) as mock_get:
+            result = get_letterboxd_data("Nenokkadine", year=2014, imdb_id="tt2375559")
+
+        self.assertEqual(mock_get.call_args_list[-1].args[0], "https://letterboxd.com/imdb/tt2375559/")
+        self.assertEqual(result["url"], "https://letterboxd.com/film/1-nenokkadine/")
+        self.assertAlmostEqual(result["rating"], 3.56, places=5)
+        self.assertEqual(result["year"], 2014)
+
+    def test_unknown_imdb_id_falls_back_to_search(self):
+        not_found = """
+        <html><head>
+        <meta property="og:url" content="https://letterboxd.com/imdb/tt0000000/">
+        <title>IMDb ID Not found</title>
+        </head><body></body></html>
+        """
+        responses = [
+            _make_404(), _make_404(), _make_404(),                # 3 slug candidates
+            _make_response(not_found),                            # /imdb/<id>/
+            _search_response(("Some Film", 2020, "some-film-2020")),
+            _make_response(_html_with_itemprop_rating(3.8)),
+        ]
+
+        with patch("scraper.letterboxd_scraper.SESSION.get", side_effect=responses):
+            result = get_letterboxd_data("Some Film", imdb_id="tt0000000")
+
+        self.assertAlmostEqual(result["rating"], 3.8, places=5)
 
     # ------------------------------------------------------------------
     # Both URLs failing returns None
@@ -131,14 +231,13 @@ class TestGetLetterboxdData(unittest.TestCase):
         self.assertIsNone(result["url"])
 
     def test_direct_404_and_search_returns_no_slug_returns_none(self):
-        """When all direct slugs are 404 and search page has no film links, rating is None."""
-        empty_search_html = "<html><body><p>No results</p></body></html>"
+        """When all direct slugs are 404 and the search finds no films, rating is None."""
 
         responses = [
             _make_404(),                        # some-film -> 404
             _make_404(),                        # some-film-1 -> 404
             _make_404(),                        # some-film-2 -> 404
-            _make_response(empty_search_html),  # search page with no links
+            _search_response(),                 # search with no results
         ]
 
         with patch("scraper.letterboxd_scraper.SESSION.get", side_effect=responses):
@@ -148,13 +247,13 @@ class TestGetLetterboxdData(unittest.TestCase):
 
     def test_direct_404_and_search_slug_page_also_404_returns_none(self):
         """When all direct slugs are 404, search finds a slug, but that page is also 404."""
-        search_html = _search_html_with_slug("some-film")
+        search = _search_response(("Some Film", 2020, "some-film-2020"))
 
         responses = [
             _make_404(),                 # some-film -> 404
             _make_404(),                 # some-film-1 -> 404
             _make_404(),                 # some-film-2 -> 404
-            _make_response(search_html), # search page
+            search,                      # search API
             _make_404(),                 # film page from search slug -> 404
         ]
 

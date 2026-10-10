@@ -166,7 +166,8 @@ def fetch_all(
             mc = get_metacritic_data(title, year=year, resolver=None, rate_limiter=rate_limiter)
             time.sleep(delay)
 
-            lb = get_letterboxd_data(title, year=year, resolver=None, rate_limiter=rate_limiter)
+            lb = get_letterboxd_data(title, year=year, resolver=None, rate_limiter=rate_limiter,
+                                     imdb_id=omdb.get("imdb_id"))
             time.sleep(delay)
 
             scraped_metascore = mc.get("metascore")
